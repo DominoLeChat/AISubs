@@ -1157,13 +1157,7 @@ ${chunk}`;
     throw lastError;
   }
   
-  // Process ALL chunks in parallel (up to RPM limit)
-  // With 60 RPM, we can process all ~20 chunks simultaneously
-  // Simple approach: process everything in one big parallel batch
-  const MAX_PARALLEL = parseInt(process.env.MAX_PARALLEL_TRANSLATIONS || '8', 10);
-  const maxParallelRequests = Math.min(MAX_PARALLEL, chunks.length);
-  
-  console.log(`  Processing ${chunks.length} chunk(s) in parallel (${selectedModelConfig.rpm} RPM allows up to ${maxParallelRequests} parallel)`);
+
   
   // Process chunks with bounded concurrency to avoid OpenRouter 429 storms
   const MAX_PARALLEL = parseInt(process.env.MAX_PARALLEL_TRANSLATIONS || '4', 10);
