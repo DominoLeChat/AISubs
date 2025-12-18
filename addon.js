@@ -1879,8 +1879,7 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
         const label = `${labelBase}${latency}`;
         return `<option value="${escapeHtml(id)}" ${selectedModel === id ? 'selected' : ''}>${label}</option>`;
       })
-  ].join('
-');
+  ].join('\n');
 
   const selectedLangs = currentPrefs.languages || ['en'];
   const saved = req.query.saved === 'true';
