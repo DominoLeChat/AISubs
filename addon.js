@@ -86,57 +86,148 @@ app.use((req, res, next) => {
   next();
 });
 
-const MODEL_CONFIGS = {
-  'meta-llama/llama-3.1-8b-instruct': {
-    rpm: 60,
-    tpm: 1000000,
-    rpd: 10000,
-    maxTokens: 8192,
-    priority: 0
-  },
-  'google/gemma-2-9b-it': {
-    rpm: 60,
-    tpm: 1000000,
-    rpd: 10000,
-    maxTokens: 8192,
-    priority: 1
-  },
-  'google/gemma-2-2b-it': {
-    rpm: 60,
-    tpm: 1000000,
-    rpd: 10000,
-    maxTokens: 8192,
-    priority: 2
-  },
-  'google/gemma-2-1.1b-it': {
-    rpm: 60,
-    tpm: 1000000,
-    rpd: 10000,
-    maxTokens: 8192,
-    priority: 3
-  },
-  'mistralai/mistral-7b-instruct': {
-    rpm: 60,
-    tpm: 1000000,
-    rpd: 10000,
-    maxTokens: 8192,
-    priority: 4
-  }
-};
+// --- OpenRouter dynamic FREE model selection (Top 10) ---
+const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+const FREE_MODELS_LIMIT = 10;
 
+// Refresh periodically (models / free capacity can change)
+const FREE_MODELS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+let MODEL_CONFIGS = {}; // modelId -> config used by the translator
+let MODEL_META = {};    // modelId -> { name, latencyP50Ms, qualityScore }
 let currentModelName = null;
 let currentModelConfig = null;
 
-const modelsToTry = Object.entries(MODEL_CONFIGS)
-  .sort((a, b) => a[1].priority - b[1].priority)
-  .map(([name, config]) => ({ name, ...config }));
+let freeModelsCache = { models: [], fetchedAt: 0 };
 
-currentModelName = modelsToTry[0].name;
-currentModelConfig = MODEL_CONFIGS[currentModelName];
-console.log(`OpenRouter AI model selection initialized: ${currentModelName}`);
-console.log(`  Limits: ${currentModelConfig.rpm} RPM, ${(currentModelConfig.tpm/1000).toFixed(0)}K TPM, ${currentModelConfig.rpd} RPD`);
-console.log(`  Note: Users must configure their own OpenRouter API key in the configuration page`);
+function toNum(v, fallback = NaN) {
+  if (v === null || v === undefined) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
+function isFreeModel(m) {
+  const p = m?.pricing || {};
+  const prompt = toNum(p.prompt ?? p.input ?? p.prompt_tokens, NaN);
+  const completion = toNum(p.completion ?? p.output ?? p.completion_tokens, NaN);
+
+  // Prefer strong signal: explicit 0 pricing
+  if (prompt === 0 && completion === 0) return true;
+
+  // Fallback signals (best-effort)
+  if (m?.free === true) return true;
+  if (typeof m?.name === 'string' && /\(free\)/i.test(m.name)) return true;
+
+  return false;
+}
+
+function computeLatencyP50Ms(m) {
+  const s = m?.stats || m?.statistics || {};
+  return toNum(
+    s.p50_latency ?? s.latency_p50 ?? s.p50 ?? m?.latency_p50,
+    Infinity
+  );
+}
+
+function computeQualityScore(m) {
+  // If OpenRouter provides rank: smaller is better => invert into higher-is-better score
+  const rank = toNum(m?.rank, NaN);
+  const params = toNum(m?.architecture?.parameters ?? m?.parameters, NaN);
+  const ctx = toNum(m?.context_length ?? m?.context, 0);
+
+  let score = 0;
+
+  if (Number.isFinite(rank)) score += (10000 - rank); // crude inversion
+  if (Number.isFinite(params)) score += Math.log10(params + 1) * 100;
+  if (Number.isFinite(ctx) && ctx > 0) score += Math.log10(ctx + 1) * 50;
+
+  return score;
+}
+
+async function fetchTopFreeModels(refererForHeaders) {
+  const now = Date.now();
+  if (freeModelsCache.models.length && (now - freeModelsCache.fetchedAt) < FREE_MODELS_CACHE_TTL_MS) {
+    return freeModelsCache.models;
+  }
+
+  const res = await axios.get(OPENROUTER_MODELS_URL, {
+    timeout: 15000,
+    headers: {
+      'HTTP-Referer': refererForHeaders || 'https://stremio-ai-subs.local',
+      'X-Title': 'Stremio AI Subtitles'
+    }
+  });
+
+  const list = res.data?.data || res.data?.models || [];
+  const free = list.filter(isFreeModel);
+
+  for (const m of free) {
+    m._latency = computeLatencyP50Ms(m);
+    m._quality = computeQualityScore(m);
+  }
+
+  // Prefer models with explicit latency metrics
+  const withLatency = free.filter(m => Number.isFinite(m._latency));
+  const withoutLatency = free.filter(m => !Number.isFinite(m._latency));
+
+  // Sort by speed first, then quality (good for fast subtitle translation)
+  const sorted =
+    withLatency.sort((a, b) => (a._latency - b._latency) || (b._quality - a._quality))
+    .concat(withoutLatency.sort((a, b) => b._quality - a._quality));
+
+  const top = sorted.slice(0, FREE_MODELS_LIMIT);
+
+  freeModelsCache = { models: top, fetchedAt: now };
+  return top;
+}
+
+async function refreshFreeModelConfigs() {
+  const models = await fetchTopFreeModels(process.env.OPENROUTER_REFERER);
+
+  MODEL_CONFIGS = {};
+  MODEL_META = {};
+
+  for (let i = 0; i < models.length; i++) {
+    const m = models[i];
+    const id = m?.id || m?.slug || m?.model || m?.name;
+    if (!id) continue;
+
+    MODEL_META[id] = {
+      name: m?.name || id,
+      latencyP50Ms: Number.isFinite(m._latency) ? m._latency : null,
+      qualityScore: m._quality
+    };
+
+    // Conservative generic limits; real limits depend on the provider + the user's OpenRouter account.
+    MODEL_CONFIGS[id] = {
+      rpm: 60,
+      tpm: 1000000,
+      rpd: 10000,
+      maxTokens: 8192,
+      priority: i
+    };
+  }
+
+  const ids = Object.keys(MODEL_CONFIGS);
+  currentModelName = ids[0] || null;
+  currentModelConfig = currentModelName ? MODEL_CONFIGS[currentModelName] : null;
+
+  console.log(`OpenRouter FREE model selection loaded: ${ids.length} model(s)`);
+  if (currentModelName) {
+    console.log(` Default model: ${currentModelName}`);
+    console.log(` Note: Users must configure their own OpenRouter API key in the configuration page`);
+  }
+}
+
+// Bootstrap refresh (non-blocking)
+refreshFreeModelConfigs().catch(err => {
+  console.error('Failed to load FREE models from OpenRouter:', err.message);
+});
+setInterval(() => {
+  refreshFreeModelConfigs().catch(err => {
+    console.error('Failed to refresh FREE models from OpenRouter:', err.message);
+  });
+}, FREE_MODELS_CACHE_TTL_MS);
 const LANGUAGE_NAMES = {
   'en': 'English',
   'es': 'Spanish',
@@ -836,16 +927,20 @@ async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLangua
   }
   
   const preferredModel = userConfig?.translation?.model;
-  let selectedModelName = preferredModel && preferredModel !== 'auto' 
-    ? preferredModel 
-    : Object.entries(MODEL_CONFIGS)
-        .sort((a, b) => a[1].priority - b[1].priority)[0][0];
-  
-  let selectedModelConfig = MODEL_CONFIGS[selectedModelName];
-  
-  if (!selectedModelConfig) {
-    throw new Error(`Model ${selectedModelName} not found in MODEL_CONFIGS`);
+
+  let selectedModelName =
+    (preferredModel && preferredModel !== 'auto' && MODEL_CONFIGS[preferredModel])
+      ? preferredModel
+      : currentModelName;
+
+  if (!selectedModelName) {
+    throw new Error(
+      'No FREE OpenRouter models available right now. ' +
+      'Please retry later or check OpenRouter model availability.'
+    );
   }
+
+  const selectedModelConfig = MODEL_CONFIGS[selectedModelName];
   
   // Use optimized chunking based on model's token limits
   const chunks = splitSubtitlesOptimized(subtitleContent, selectedModelConfig);
@@ -1042,7 +1137,8 @@ ${chunk}`;
   // Process ALL chunks in parallel (up to RPM limit)
   // With 60 RPM, we can process all ~20 chunks simultaneously
   // Simple approach: process everything in one big parallel batch
-  const maxParallelRequests = Math.min(selectedModelConfig.rpm, chunks.length);
+  const MAX_PARALLEL = parseInt(process.env.MAX_PARALLEL_TRANSLATIONS || '8', 10);
+  const maxParallelRequests = Math.min(MAX_PARALLEL, chunks.length);
   
   console.log(`  Processing ${chunks.length} chunk(s) in parallel (${selectedModelConfig.rpm} RPM allows up to ${maxParallelRequests} parallel)`);
   
@@ -1221,10 +1317,21 @@ async function translateSubtitlesWithGemini(subtitleContent, targetLanguage, use
   
   // Use user's preferred model or currentModelName
   const preferredModel = userConfig?.translation?.model;
-  const modelName = preferredModel && preferredModel !== 'auto' 
-    ? preferredModel 
-    : currentModelName;
+
+  const modelName =
+    (preferredModel && preferredModel !== 'auto' && MODEL_CONFIGS[preferredModel])
+      ? preferredModel
+      : currentModelName;
+
+  if (!modelName) {
+    throw new Error(
+      'No FREE OpenRouter models available right now. ' +
+      'Please retry later or check OpenRouter model availability.'
+    );
+  }
+
   const modelConfig = MODEL_CONFIGS[modelName] || currentModelConfig;
+
   
   try {
     const targetLanguageName = getLanguageName(targetLanguage);
@@ -1759,6 +1866,22 @@ app.get('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
  * Render the main configuration page
  */
 function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs) {
+
+  const selectedModel = currentPrefs.translation?.model || 'auto';
+  const dynamicModelOptions = [
+    `<option value="auto" ${selectedModel === 'auto' ? 'selected' : ''}>Auto (Top FREE fastest)</option>`,
+    ...Object.keys(MODEL_CONFIGS)
+      .sort((a, b) => (MODEL_CONFIGS[a].priority ?? 999) - (MODEL_CONFIGS[b].priority ?? 999))
+      .map(id => {
+        const meta = MODEL_META[id];
+        const labelBase = meta?.name ? escapeHtml(meta.name) : escapeHtml(id);
+        const latency = meta?.latencyP50Ms ? ` (~${Math.round(meta.latencyP50Ms)}ms p50)` : '';
+        const label = `${labelBase}${latency}`;
+        return `<option value="${escapeHtml(id)}" ${selectedModel === id ? 'selected' : ''}>${label}</option>`;
+      })
+  ].join('
+');
+
   const selectedLangs = currentPrefs.languages || ['en'];
   const saved = req.query.saved === 'true';
   const baseUrl = process.env.BASE_URL || `http://${req.get('host')}`;
@@ -2158,25 +2281,8 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
                       name="translationModel"
                       class="w-full px-3 py-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-md text-[hsl(var(--foreground))]"
                     >
-                      <option value="auto" ${currentPrefs.translation?.model === 'auto' ? 'selected' : ''}>
-                        Auto (Best Available)
-                      </option>
-                      <option value="meta-llama/llama-3.1-8b-instruct" ${currentPrefs.translation?.model === 'meta-llama/llama-3.1-8b-instruct' ? 'selected' : ''}>
-                        Llama 3.1 8B
-                      </option>
-                      <option value="google/gemma-2-9b-it" ${currentPrefs.translation?.model === 'google/gemma-2-9b-it' ? 'selected' : ''}>
-                        Gemma 2 9B
-                      </option>
-                      <option value="google/gemma-2-2b-it" ${currentPrefs.translation?.model === 'google/gemma-2-2b-it' ? 'selected' : ''}>
-                        Gemma 2 2B
-                      </option>
-                      <option value="google/gemma-2-1.1b-it" ${currentPrefs.translation?.model === 'google/gemma-2-1.1b-it' ? 'selected' : ''}>
-                        Gemma 2 1.1B
-                      </option>
-                      <option value="mistralai/mistral-7b-instruct" ${currentPrefs.translation?.model === 'mistralai/mistral-7b-instruct' ? 'selected' : ''}>
-                        Mistral 7B
-                      </option>
-                    </select>
+${dynamicModelOptions}
+</select>
                     <p class="text-xs text-[hsl(var(--muted-foreground))] mt-1">
                       Choose a specific model or let the system auto-select the best available.
                     </p>
@@ -3337,7 +3443,10 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     },
     translation: {
       enabled: openrouterApiKey.length > 0,
-      model: req.body.translationModel || 'auto'
+      model: (() => {
+            const requestedModel = (req.body.translationModel || 'auto').trim();
+            return (requestedModel === 'auto' || MODEL_CONFIGS[requestedModel]) ? requestedModel : 'auto';
+          })()
     }
   };
   
@@ -3838,5 +3947,3 @@ server.on('error', (error) => {
     process.exit(1);
   }
 });
-
-
