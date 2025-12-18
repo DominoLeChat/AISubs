@@ -131,11 +131,22 @@ npm run test:movie
 
 ## Configuration
 
+### OpenRouter API Key Configuration
+
+Each user must configure their own OpenRouter API key through the configuration page:
+
+1. Visit the configuration page after starting the server
+2. Enter your OpenRouter API key in the "OpenRouter API Configuration" section
+3. Optionally configure HTTP Referer and preferred translation model
+4. Save the configuration
+
+**Note**: The server-side `OPENROUTER_API_KEY` environment variable is optional and only used as a fallback if a user hasn't configured their own key. For production use, each user should provide their own API key.
+
 ### Environment Variables
 
 - `PORT`: Server port (default: 7001)
-- `OPENROUTER_API_KEY`: Your OpenRouter API key (required)
-- `OPENROUTER_REFERER`: Your app name or URL (required by OpenRouter)
+- `OPENROUTER_API_KEY`: OpenRouter API key (optional - fallback only, users should configure their own)
+- `OPENROUTER_REFERER`: Your app name or URL (optional - used as default if user doesn't specify)
 - `BASE_URL`: Base URL for the addon (default: http://127.0.0.1:7001)
 
 ### AI Models
@@ -150,7 +161,7 @@ The addon automatically selects from these models (in priority order):
 ## Troubleshooting
 
 - **No subtitles appearing**: Check that wyzie-lib can find subtitles for the media, and that your OpenRouter API key is valid
-- **Translation not working**: Ensure `OPENROUTER_API_KEY` and `OPENROUTER_REFERER` are set correctly in `.env`
+- **Translation not working**: Ensure you have configured your OpenRouter API key in the configuration page. The server-side `OPENROUTER_API_KEY` is optional and only used as a fallback.
 - **Configuration not saving**: Check that the server is running and accessible
 - **Rate limit errors**: The addon automatically handles rate limits, but if you see errors, check your OpenRouter quota
 

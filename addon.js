@@ -501,23 +501,49 @@ function calculateRequestDelay(modelConfig) {
 /**
  * Translate subtitles with intelligent chunking (optimized for RPM, TPM, RPD)
  */
-async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage) {
-  if (!openRouterApiKey || !currentModelConfig) {
-    throw new Error('OpenRouter API key not initialized. Please set OPENROUTER_API_KEY.');
+async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage, userConfig) {
+  // Extract user's OpenRouter credentials
+  const userApiKey = userConfig?.openrouter?.apiKey;
+  const userReferer = userConfig?.openrouter?.referer;
+  
+  // Fallback to server key if user hasn't configured (for backward compatibility during transition)
+  const apiKey = userApiKey || process.env.OPENROUTER_API_KEY;
+  const referer = userReferer || process.env.OPENROUTER_REFERER || 'https://stremio-ai-subs.local';
+  
+  if (!apiKey) {
+    throw new Error(
+      'OpenRouter API key not configured. ' +
+      'Please visit the configuration page and add your OpenRouter API key. ' +
+      'Get your key at https://openrouter.ai/keys'
+    );
+  }
+  
+  // Use user's preferred model or auto-select
+  const preferredModel = userConfig?.translation?.model;
+  let selectedModelName = preferredModel && preferredModel !== 'auto' 
+    ? preferredModel 
+    : Object.entries(MODEL_CONFIGS)
+        .sort((a, b) => a[1].priority - b[1].priority)[0][0];
+  
+  let selectedModelConfig = MODEL_CONFIGS[selectedModelName];
+  
+  if (!selectedModelConfig) {
+    throw new Error(`Model ${selectedModelName} not found in MODEL_CONFIGS`);
   }
   
   // Use optimized chunking based on model's token limits
-  const chunks = splitSubtitlesOptimized(subtitleContent, currentModelConfig);
+  const chunks = splitSubtitlesOptimized(subtitleContent, selectedModelConfig);
   
   if (chunks.length === 0) {
     throw new Error('No subtitle chunks created');
   }
   
-  console.log(`Translating ${chunks.length} chunk(s) with ${currentModelName}`);
-  console.log(`  Model limits: ${currentModelConfig.rpm} RPM, ${(currentModelConfig.tpm/1000).toFixed(0)}K TPM, ${currentModelConfig.rpd} RPD`);
+  console.log(`Translating ${chunks.length} chunk(s) with ${selectedModelName}`);
+  console.log(`  Using API key: ${userApiKey ? 'User key' : 'Server key (fallback)'}`);
+  console.log(`  Model limits: ${selectedModelConfig.rpm} RPM, ${(selectedModelConfig.tpm/1000).toFixed(0)}K TPM, ${selectedModelConfig.rpd} RPD`);
   
   // Calculate optimal delay between requests
-  const requestDelay = calculateRequestDelay(currentModelConfig);
+  const requestDelay = calculateRequestDelay(selectedModelConfig);
   console.log(`  Request delay: ${requestDelay}ms between chunks`);
   
   // Translate chunk with retry logic and rate limiting
@@ -535,7 +561,7 @@ ${chunk}`;
     const estimatedTokens = estimateTokens(prompt);
     
     // Enforce rate limits before request (non-blocking if under limit)
-    await enforceRateLimits(currentModelConfig);
+    await enforceRateLimits(selectedModelConfig);
     
     const retries = 5;
     const retryDelay = 2000;
@@ -543,7 +569,7 @@ ${chunk}`;
     
     for (let attempt = 0; attempt < retries; attempt++) {
       try {
-        if (!openRouterApiKey) {
+        if (!apiKey) {
           throw new Error('OpenRouter API key not configured');
         }
 
@@ -554,7 +580,7 @@ ${chunk}`;
         const response = await axios.post(
           'https://openrouter.ai/api/v1/chat/completions',
           {
-            model: currentModelName,
+            model: selectedModelName,  // Use selected model
             messages: [
               {
                 role: 'user',
@@ -562,13 +588,13 @@ ${chunk}`;
               }
             ],
             temperature: 0.3,
-            max_tokens: currentModelConfig.maxTokens * 4 // Allow much longer responses (4x) to prevent truncation
+            max_tokens: selectedModelConfig.maxTokens * 4 // Allow much longer responses (4x) to prevent truncation
           },
           {
             headers: {
-              'Authorization': `Bearer ${openRouterApiKey}`,
+              'Authorization': `Bearer ${apiKey}`,  // Use user's or server's key
               'Content-Type': 'application/json',
-              'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://github.com/stremio-ai-subs',
+              'HTTP-Referer': referer,  // Use user's or server's referer
               'X-Title': 'Stremio AI Subtitles'
             },
             timeout: 120000 // 2 minutes timeout
@@ -725,9 +751,9 @@ ${chunk}`;
   // Process ALL chunks in parallel (up to RPM limit)
   // With 60 RPM, we can process all ~20 chunks simultaneously
   // Simple approach: process everything in one big parallel batch
-  const maxParallelRequests = Math.min(currentModelConfig.rpm, chunks.length);
+  const maxParallelRequests = Math.min(selectedModelConfig.rpm, chunks.length);
   
-  console.log(`  Processing ${chunks.length} chunk(s) in parallel (${currentModelConfig.rpm} RPM allows up to ${maxParallelRequests} parallel)`);
+  console.log(`  Processing ${chunks.length} chunk(s) in parallel (${selectedModelConfig.rpm} RPM allows up to ${maxParallelRequests} parallel)`);
   
   const translatedChunks = new Array(chunks.length);
   const batch = [];
@@ -794,19 +820,34 @@ ${chunk}`;
 /**
  * Translate subtitles using OpenRouter AI (enhanced with automatic chunking)
  */
-async function translateSubtitlesWithGemini(subtitleContent, targetLanguage) {
+async function translateSubtitlesWithGemini(subtitleContent, targetLanguage, userConfig) {
   // Auto-detect if chunking is needed (large files > 20KB)
   const shouldChunk = subtitleContent.length > 20000;
   
   if (shouldChunk) {
     console.log(`Large subtitle file detected (${subtitleContent.length} chars), using intelligent token-based chunking...`);
-    return await translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage);
+    return await translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage, userConfig);
   }
   
-  // Original single-request translation for small files
-  if (!openRouterApiKey) {
-    throw new Error('OpenRouter API key not initialized. Please set OPENROUTER_API_KEY.');
+  // Extract user's credentials
+  const userApiKey = userConfig?.openrouter?.apiKey;
+  const userReferer = userConfig?.openrouter?.referer;
+  const apiKey = userApiKey || process.env.OPENROUTER_API_KEY;
+  const referer = userReferer || process.env.OPENROUTER_REFERER || 'https://stremio-ai-subs.local';
+  
+  if (!apiKey) {
+    throw new Error(
+      'OpenRouter API key not configured. ' +
+      'Please visit the configuration page and add your OpenRouter API key.'
+    );
   }
+  
+  // Use user's preferred model or currentModelName
+  const preferredModel = userConfig?.translation?.model;
+  const modelName = preferredModel && preferredModel !== 'auto' 
+    ? preferredModel 
+    : currentModelName;
+  const modelConfig = MODEL_CONFIGS[modelName] || currentModelConfig;
   
   try {
     const targetLanguageName = getLanguageName(targetLanguage);
@@ -825,7 +866,7 @@ ${subtitleContent}`;
     const response = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
       {
-        model: currentModelName,
+        model: modelName,
         messages: [
           {
             role: 'user',
@@ -833,13 +874,13 @@ ${subtitleContent}`;
           }
         ],
         temperature: 0.3,
-        max_tokens: currentModelConfig.maxTokens
+        max_tokens: modelConfig.maxTokens
       },
       {
         headers: {
-          'Authorization': `Bearer ${openRouterApiKey}`,
+          'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://github.com/stremio-ai-subs',
+          'HTTP-Referer': referer,
           'X-Title': 'Stremio AI Subtitles'
         },
         timeout: 120000
@@ -1191,7 +1232,18 @@ app.get('/stremio/:uuid/:encryptedConfig/configure', (req, res) => {
   
   // Get or create preferences
   if (!userPreferences[userId]) {
-    userPreferences[userId] = { languages: ['en'], uuid: userId };
+    userPreferences[userId] = { 
+      languages: ['en'], 
+      uuid: userId,
+      openrouter: {
+        apiKey: '',  // Empty by default
+        referer: process.env.OPENROUTER_REFERER || ''
+      },
+      translation: {
+        enabled: false,
+        model: 'auto'
+      }
+    };
   }
   
   const currentPrefs = userPreferences[userId];
@@ -1508,6 +1560,101 @@ app.get('/stremio/:uuid/:encryptedConfig/configure', (req, res) => {
                   </div>
                 </div>
                 
+                <!-- OpenRouter API Configuration Section -->
+                <div class="bg-[hsl(var(--card))] border border-[hsl(var(--border))] rounded-lg p-6 mb-6">
+                  <h2 class="text-xl font-semibold mb-4">OpenRouter API Configuration</h2>
+                  <p class="text-[hsl(var(--muted-foreground))] text-sm mb-4">
+                    Enter your OpenRouter API key to enable AI translation. 
+                    <a href="https://openrouter.ai/keys" target="_blank" class="text-[hsl(var(--primary))] hover:underline">
+                      Get your API key here
+                    </a>
+                  </p>
+                  
+                  <div class="mb-4">
+                    <label for="openrouterApiKey" class="block text-sm font-medium mb-2">
+                      OpenRouter API Key <span class="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="password" 
+                      id="openrouterApiKey" 
+                      name="openrouterApiKey" 
+                      placeholder="sk-or-v1-..."
+                      value="${currentPrefs.openrouter?.apiKey ? '***' + currentPrefs.openrouter.apiKey.slice(-4) : ''}"
+                      class="w-full px-3 py-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-md text-[hsl(var(--foreground))]"
+                      autocomplete="off"
+                    >
+                    <p class="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+                      Your API key is encrypted and stored securely. Required for AI translation.
+                    </p>
+                  </div>
+                  
+                  <div class="mb-4">
+                    <label for="openrouterReferer" class="block text-sm font-medium mb-2">
+                      HTTP Referer (Optional)
+                    </label>
+                    <input 
+                      type="text" 
+                      id="openrouterReferer" 
+                      name="openrouterReferer" 
+                      placeholder="https://your-app.com"
+                      value="${currentPrefs.openrouter?.referer || process.env.OPENROUTER_REFERER || ''}"
+                      class="w-full px-3 py-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-md text-[hsl(var(--foreground))]"
+                    >
+                    <p class="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+                      Your app URL or name. Used by OpenRouter for analytics.
+                    </p>
+                  </div>
+                  
+                  <div class="mb-4">
+                    <label for="translationModel" class="block text-sm font-medium mb-2">
+                      Translation Model (Optional)
+                    </label>
+                    <select 
+                      id="translationModel" 
+                      name="translationModel"
+                      class="w-full px-3 py-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-md text-[hsl(var(--foreground))]"
+                    >
+                      <option value="auto" ${currentPrefs.translation?.model === 'auto' ? 'selected' : ''}>
+                        Auto (Best Available)
+                      </option>
+                      <option value="meta-llama/llama-3.1-8b-instruct" ${currentPrefs.translation?.model === 'meta-llama/llama-3.1-8b-instruct' ? 'selected' : ''}>
+                        Llama 3.1 8B
+                      </option>
+                      <option value="google/gemma-2-9b-it" ${currentPrefs.translation?.model === 'google/gemma-2-9b-it' ? 'selected' : ''}>
+                        Gemma 2 9B
+                      </option>
+                      <option value="google/gemma-2-2b-it" ${currentPrefs.translation?.model === 'google/gemma-2-2b-it' ? 'selected' : ''}>
+                        Gemma 2 2B
+                      </option>
+                      <option value="google/gemma-2-1.1b-it" ${currentPrefs.translation?.model === 'google/gemma-2-1.1b-it' ? 'selected' : ''}>
+                        Gemma 2 1.1B
+                      </option>
+                      <option value="mistralai/mistral-7b-instruct" ${currentPrefs.translation?.model === 'mistralai/mistral-7b-instruct' ? 'selected' : ''}>
+                        Mistral 7B
+                      </option>
+                    </select>
+                    <p class="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+                      Choose a specific model or let the system auto-select the best available.
+                    </p>
+                  </div>
+                  
+                  ${!currentPrefs.openrouter?.apiKey ? `
+                    <div class="bg-yellow-900/20 border border-yellow-700/50 rounded-md p-3 mb-4">
+                      <p class="text-yellow-200 text-sm">
+                        <strong>⚠️ Translation Disabled</strong><br>
+                        Add your OpenRouter API key to enable AI subtitle translation.
+                      </p>
+                    </div>
+                  ` : `
+                    <div class="bg-green-900/20 border border-green-700/50 rounded-md p-3 mb-4">
+                      <p class="text-green-200 text-sm">
+                        <strong>✅ Translation Enabled</strong><br>
+                        Your OpenRouter API key is configured. Translation will use your account credits.
+                      </p>
+                    </div>
+                  `}
+                </div>
+                
                 <!-- Actions -->
                 <div class="flex justify-end gap-3 pt-4 border-t border-[hsl(var(--border))]">
                   <button 
@@ -1740,17 +1887,52 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', (req, res) => {
     languages = ['en'];
   }
   
+  // Extract OpenRouter credentials from form
+  const openrouterApiKey = (req.body.openrouterApiKey || '').trim();
+  const openrouterReferer = (req.body.openrouterReferer || process.env.OPENROUTER_REFERER || '').trim();
+  
+  // Validate API key format if provided
+  if (openrouterApiKey && openrouterApiKey.length > 0) {
+    if (!openrouterApiKey.startsWith('sk-or-v1-') && !openrouterApiKey.startsWith('sk-')) {
+      return res.status(400).send(generateErrorPage(
+        'Invalid OpenRouter API Key',
+        'OpenRouter API keys should start with "sk-or-v1-" or "sk-". Please check your key and try again.'
+      ));
+    }
+    if (openrouterApiKey.length < 20) {
+      return res.status(400).send(generateErrorPage(
+        'Invalid OpenRouter API Key',
+        'API key appears to be too short. Please check your key and try again.'
+      ));
+    }
+  }
+  
   // Store user preferences with UUID
   userPreferences[userId] = {
     languages: languages,
     uuid: userId,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    openrouter: {
+      apiKey: openrouterApiKey,
+      referer: openrouterReferer
+    },
+    translation: {
+      enabled: openrouterApiKey.length > 0,
+      model: req.body.translationModel || 'auto'
+    }
   };
   
   // Generate new encrypted config
-  const newConfig = encryptConfig({ uuid: userId, languages: languages });
+  const newConfig = encryptConfig({ 
+    uuid: userId, 
+    languages: languages,
+    openrouter: userPreferences[userId].openrouter,
+    translation: userPreferences[userId].translation
+  });
   
   console.log(`Saved preferences for user ${userId}:`, userPreferences[userId]);
+  console.log(`  Languages: ${languages.join(', ')}`);
+  console.log(`  OpenRouter API Key: ${openrouterApiKey ? '***' + openrouterApiKey.slice(-4) : 'Not set'}`);
   
   res.redirect(`/stremio/${uuid}/${newConfig}/configure?saved=true`);
 });
@@ -1760,7 +1942,19 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', (req, res) => {
  */
 app.get('/configure', (req, res) => {
   const newUuid = uuidv4();
-  const newConfig = encryptConfig({ uuid: newUuid, languages: ['en'] });
+  const defaultConfig = {
+    uuid: newUuid,
+    languages: ['en'],
+    openrouter: {
+      apiKey: '',  // User will configure
+      referer: process.env.OPENROUTER_REFERER || ''
+    },
+    translation: {
+      enabled: false,  // Disabled until user adds API key
+      model: 'auto'
+    }
+  };
+  const newConfig = encryptConfig(defaultConfig);
   res.redirect(`/stremio/${newUuid}/${newConfig}/configure`);
 });
 
@@ -1810,6 +2004,20 @@ const subtitleHandler = async function(args) {
   try {
     // Get user's preferred languages from userData (UUID-based)
     const userId = userData?.userId || userData?.uuid || 'default';
+    
+    // Get user's full configuration
+    const userConfig = userPreferences[userId] || { 
+      languages: ['en'],
+      openrouter: {
+        apiKey: '',
+        referer: process.env.OPENROUTER_REFERER || ''
+      },
+      translation: {
+        enabled: false,
+        model: 'auto'
+      }
+    };
+    
     const preferredLanguages = getUserLanguages({ userData: { userId } });
     
     // Always include English first, then user's preferred languages
@@ -1819,6 +2027,7 @@ const subtitleHandler = async function(args) {
     console.log(`\n🔍 Processing subtitle request for ${type}/${id} (season: ${season}, episode: ${episode})`);
     console.log(`👤 User ID: ${userId}`);
     console.log(`🌐 User preferred languages: ${preferredLanguages.join(', ')}`);
+    console.log(`🔑 OpenRouter API Key: ${userConfig.openrouter?.apiKey ? 'Configured (User)' : process.env.OPENROUTER_API_KEY ? 'Using server key (fallback)' : 'Not configured'}`);
     console.log(`📋 Processing languages: ${allLanguages.join(', ')}`);
     
     for (const lang of allLanguages) {
@@ -1869,7 +2078,8 @@ const subtitleHandler = async function(args) {
               // Translate using OpenRouter AI
               const translatedContent = await translateSubtitlesWithGemini(
                 englishSubtitle.content,
-                lang
+                lang,
+                userConfig  // Pass user configuration
               );
               
               if (!translatedContent) {
@@ -1904,7 +2114,13 @@ const subtitleHandler = async function(args) {
                 });
               }
             } catch (translationError) {
-              console.error(`Error translating to ${lang}:`, translationError.message);
+              if (translationError.message.includes('API key not configured')) {
+                console.error(`⚠️  Translation failed: User needs to configure OpenRouter API key`);
+                const baseUrl = process.env.BASE_URL || `http://${req?.get?.('host') || 'localhost:7001'}`;
+                console.error(`   Visit: ${baseUrl}/configure`);
+              } else {
+                console.error(`Error translating to ${lang}:`, translationError.message);
+              }
               // Continue with other languages
             }
           } else {
