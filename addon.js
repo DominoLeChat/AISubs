@@ -757,9 +757,15 @@ function estimateTokens(text) {
 
 function splitSubtitlesOptimized(srtContent, modelConfig) {
   const totalChars = srtContent.length;
-  
-  const targetChunks = 100;
-  const charsPerChunk = Math.max(400, Math.ceil(totalChars / targetChunks));
+
+  // Fewer chunks = fewer API calls = faster (and fewer 429s) for subtitle translation
+  const targetChunks = parseInt(process.env.TARGET_SUBTITLE_CHUNKS || '30', 10);
+
+  // Rough token->char heuristic: 1 token ~ 4 chars. Keep a safety margin for prompt overhead.
+  const approxMaxCharsByTokens = Math.max(1200, Math.floor(((modelConfig?.maxTokens || 8192) * 3)));
+
+  const idealCharsPerChunk = Math.ceil(totalChars / Math.max(1, targetChunks));
+  const charsPerChunk = Math.max(1200, Math.min(approxMaxCharsByTokens, idealCharsPerChunk));
   
   console.log(`  Splitting ${totalChars.toLocaleString()} chars into ~${Math.ceil(totalChars / charsPerChunk)} chunks (~${charsPerChunk.toLocaleString()} chars each)`);
   
@@ -914,6 +920,23 @@ function calculateRequestDelay(modelConfig) {
   return Math.max(minDelay, 1000);
 }
 
+
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) break;
+      results[i] = await worker(items[i], i);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
 async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage, userConfig) {
   const apiKey = userConfig?.openrouter?.apiKey;
   const referer = userConfig?.openrouter?.referer || 'https://stremio-ai-subs.local';
@@ -1142,34 +1165,37 @@ ${chunk}`;
   
   console.log(`  Processing ${chunks.length} chunk(s) in parallel (${selectedModelConfig.rpm} RPM allows up to ${maxParallelRequests} parallel)`);
   
+  // Process chunks with bounded concurrency to avoid OpenRouter 429 storms
+  const MAX_PARALLEL = parseInt(process.env.MAX_PARALLEL_TRANSLATIONS || '4', 10);
+  const maxParallelRequests = Math.max(1, Math.min(MAX_PARALLEL, chunks.length));
+
+  console.log(`  Processing ${chunks.length} chunk(s) with concurrency=${maxParallelRequests}`);
+
   const translatedChunks = new Array(chunks.length);
-  const batch = [];
-  
-  // Create promises for all chunks with timeout protection
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkPromise = translateChunk(chunks[i], i);
-    
-    // Add timeout wrapper (2 minutes max per chunk - should be enough for small chunks)
+
+  console.log(` ⏳ Processing all ${chunks.length} chunk(s)...`);
+  const batchResults = await mapWithConcurrency(chunks, maxParallelRequests, async (chunk, i) => {
+    // Small stagger helps reduce burstiness across workers
+    const STAGGER_MS = parseInt(process.env.CHUNK_STAGGER_MS || '150', 10);
+    if (i > 0 && STAGGER_MS > 0) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(STAGGER_MS * (i % maxParallelRequests), 1500)));
+    }
+
+    const chunkPromise = translateChunk(chunk, i);
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error(`Chunk ${i + 1} timed out after 2 minutes`)), 120000);
     });
-    
-    batch.push(
-      Promise.race([chunkPromise, timeoutPromise])
-        .then(result => ({ index: i, result }))
-        .catch(error => {
-          console.log(`  ❌ Chunk ${i + 1} error: ${error.message}`);
-          // Return a placeholder so we don't block other chunks
-          return { index: i, error, result: null };
-        })
-    );
-  }
-  
-  // Wait for all chunks to complete
-  console.log(`  ⏳ Processing all ${batch.length} chunk(s) in parallel...`);
-  const batchResults = await Promise.all(batch);
-  console.log(`  📦 All ${batch.length} chunk(s) completed`);
-  
+
+    try {
+      const result = await Promise.race([chunkPromise, timeoutPromise]);
+      return { index: i, result };
+    } catch (error) {
+      console.log(` ❌ Chunk ${i + 1} error: ${error.message}`);
+      return { index: i, error, result: null };
+    }
+  });
+  console.log(` 📦 All ${batchResults.length} chunk(s) completed`);
+
   const errors = [];
   const failedChunks = [];
   
