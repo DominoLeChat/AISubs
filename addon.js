@@ -23,6 +23,24 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static assets (logo, favicon, icons) with proper headers
+app.use('/assets', (req, res, next) => {
+  // Set CORS headers for assets
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  // Set cache control
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  next();
+}, express.static(path.join(__dirname, 'assets'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.png')) {
+      res.setHeader('Content-Type', 'image/png');
+    } else if (filePath.endsWith('.svg')) {
+      res.setHeader('Content-Type', 'image/svg+xml');
+    }
+  }
+}));
+
 app.use((req, res, next) => {
   req.cookies = {};
   if (req.headers.cookie) {
@@ -1216,6 +1234,7 @@ CRITICAL INSTRUCTIONS:
 3. Only translate the text content, not the numbers or timing information
 4. Maintain the same structure and line breaks
 5. Do not add or remove subtitle entries
+6. Use modern way of talking and slang while translating
 
 Subtitle content:
 ${subtitleContent}`;
@@ -1525,6 +1544,7 @@ function generateSetupPage(uuid, encryptedConfig, errorMessage = null) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Setup Configuration - AI Subtitle Translator</title>
+  <link rel="icon" type="image/png" href="/assets/logo.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     :root {
@@ -1544,8 +1564,11 @@ function generateSetupPage(uuid, encryptedConfig, errorMessage = null) {
 </head>
 <body class="min-h-screen flex items-center justify-center p-4">
   <div class="bg-[hsl(var(--card))] border border-[hsl(var(--border))] rounded-xl shadow-2xl p-8 max-w-md w-full">
-    <h1 class="text-2xl font-bold mb-2">Setup Configuration</h1>
-    <p class="text-[hsl(var(--muted-foreground))] mb-6">Create a password to protect your configuration settings.</p>
+    <div class="flex items-center justify-center mb-6">
+      <img src="/assets/logo.png" alt="AI Subtitle Translator" class="w-16 h-16">
+    </div>
+    <h1 class="text-2xl font-bold mb-2 text-center">Setup Configuration</h1>
+    <p class="text-[hsl(var(--muted-foreground))] mb-6 text-center">Create a password to protect your configuration settings.</p>
     
     ${errorMessage ? `
       <div class="bg-red-900/20 border border-red-700/50 rounded-md p-3 mb-4">
@@ -1824,6 +1847,7 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>AI Subtitle Translator - Configuration</title>
+      <link rel="icon" type="image/png" href="/assets/logo.png">
       <script src="https://cdn.tailwindcss.com"></script>
       <script>
         tailwind.config = {
@@ -1959,9 +1983,12 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
           <div class="bg-[hsl(var(--card))] border border-[hsl(var(--border))] rounded-xl shadow-2xl overflow-hidden">
             <!-- Header -->
             <div class="bg-[hsl(var(--card))] px-6 py-6 sm:px-8 sm:py-8 border-b border-[hsl(var(--border))]">
-              <div>
-                <h1 class="text-2xl sm:text-3xl font-semibold text-[hsl(var(--foreground))] mb-1">AI Subtitle Translator</h1>
-                <p class="text-[hsl(var(--muted-foreground))] text-sm sm:text-base">Select your preferred subtitle languages</p>
+              <div class="flex items-center gap-4">
+                <img src="/assets/logo.png" alt="AI Subtitle Translator" class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0">
+                <div>
+                  <h1 class="text-2xl sm:text-3xl font-semibold text-[hsl(var(--foreground))] mb-1">AI Subtitle Translator</h1>
+                  <p class="text-[hsl(var(--muted-foreground))] text-sm sm:text-base">Select your preferred subtitle languages</p>
+                </div>
               </div>
             </div>
             
@@ -2492,6 +2519,7 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>AI Subtitle Translator - Configuration</title>
+      <link rel="icon" type="image/png" href="/assets/logo.png">
       <script src="https://cdn.tailwindcss.com"></script>
       <script>
         tailwind.config = {
@@ -2627,9 +2655,12 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
           <div class="bg-[hsl(var(--card))] border border-[hsl(var(--border))] rounded-xl shadow-2xl overflow-hidden">
             <!-- Header -->
             <div class="bg-[hsl(var(--card))] px-6 py-6 sm:px-8 sm:py-8 border-b border-[hsl(var(--border))]">
-              <div>
-                <h1 class="text-2xl sm:text-3xl font-semibold text-[hsl(var(--foreground))] mb-1">AI Subtitle Translator</h1>
-                <p class="text-[hsl(var(--muted-foreground))] text-sm sm:text-base">Select your preferred subtitle languages</p>
+              <div class="flex items-center gap-4">
+                <img src="/assets/logo.png" alt="AI Subtitle Translator" class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0">
+                <div>
+                  <h1 class="text-2xl sm:text-3xl font-semibold text-[hsl(var(--foreground))] mb-1">AI Subtitle Translator</h1>
+                  <p class="text-[hsl(var(--muted-foreground))] text-sm sm:text-base">Select your preferred subtitle languages</p>
+                </div>
               </div>
             </div>
             
@@ -3556,7 +3587,10 @@ app.get('/stremio/:uuid/:encryptedConfig/manifest.json', async (req, res) => {
   try {
     const { uuid, encryptedConfig } = req.params;
     
-    const baseUrl = process.env.BASE_URL || `http://127.0.0.1:${port}`;
+    // Use request host if available, otherwise fall back to BASE_URL or default
+    const protocol = req.protocol || 'http';
+    const host = req.get('host') || `127.0.0.1:${port}`;
+    const baseUrl = process.env.BASE_URL || `${protocol}://${host}`;
     const configUrl = `${baseUrl}/stremio/${uuid}/${encryptedConfig}/configure`;
     
     const manifestData = {
@@ -3564,6 +3598,7 @@ app.get('/stremio/:uuid/:encryptedConfig/manifest.json', async (req, res) => {
       version: '1.0.0',
       name: 'AI Subtitle Translator',
       description: 'Translates subtitles using AI (OpenRouter) for Stremio',
+      logo: `${baseUrl}/assets/logo.png`,
       catalogs: [],
       resources: ['subtitles'],
       types: ['movie', 'series'],
@@ -3576,6 +3611,7 @@ app.get('/stremio/:uuid/:encryptedConfig/manifest.json', async (req, res) => {
     
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET');
+    res.setHeader('Content-Type', 'application/json');
     res.json(manifestData);
   } catch (error) {
     console.error('Error serving manifest:', error);
