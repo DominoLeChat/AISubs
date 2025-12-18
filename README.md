@@ -48,6 +48,63 @@ openssl rand -hex 32
    - Add it in the addon's configuration page (not in `.env`)
    - The referer field is optional but recommended
 
+## Docker Deployment
+
+### Quick Start with Docker
+
+1. Clone the repository:
+```bash
+git clone <repo-url>
+cd AISubs
+```
+
+2. Create a `.env` file from the template:
+```bash
+cp .env.sample .env
+# Edit .env with your settings
+```
+
+3. Generate a secure MASTER_KEY:
+```bash
+openssl rand -hex 32
+```
+Add this to your `.env` file.
+
+4. Start with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+5. Access the service:
+   - Configuration page: `http://localhost:7001/configure`
+   - Manifest URL: `http://localhost:7001/manifest.json`
+   - Health check: `http://localhost:7001/health`
+
+### Docker Commands
+
+- **Build image**: `npm run docker:build` or `docker build -t aisubs .`
+- **Start container**: `npm run docker:run` or `docker-compose up -d`
+- **Stop container**: `npm run docker:stop` or `docker-compose down`
+- **View logs**: `npm run docker:logs` or `docker-compose logs -f`
+- **Restart container**: `npm run docker:restart` or `docker-compose restart`
+
+### Docker Configuration
+
+The Docker setup includes:
+- **Health checks**: Automatic health monitoring via `/health` endpoint
+- **Volume persistence**: Configuration files are persisted in `./configs` directory
+- **Auto-restart**: Container automatically restarts unless stopped
+- **Port mapping**: Default port 7001 (configurable via `PORT` environment variable)
+
+### Environment Variables for Docker
+
+All environment variables from `.env` are automatically passed to the container:
+- `PORT`: Server port (default: 7001)
+- `BASE_URL`: Base URL for the addon
+- `MASTER_KEY`: Encryption key (32-byte hex string)
+- `OPENROUTER_API_KEY`: Optional fallback API key
+- `OPENROUTER_REFERER`: Optional referer string
+
 ## Usage
 
 1. Start the addon:

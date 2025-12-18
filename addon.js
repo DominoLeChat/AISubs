@@ -4028,6 +4028,15 @@ app.get('/subtitles/:type/:id.json', async (req, res) => {
   res.redirect(`/stremio/${newUuid}/${newConfig}/subtitles/${req.params.type}/${req.params.id}.json`);
 });
 
+// Health check endpoint for Docker and monitoring
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    service: 'aisubs'
+  });
+});
+
 // Initialize configs directory and load config count
 (async () => {
   try {
