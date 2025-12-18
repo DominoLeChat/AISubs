@@ -9,10 +9,10 @@ const path = require('path');
 require('dotenv').config();
 
 const app = express();
-// Log all incoming requests for debugging
+
 app.use((req, res, next) => {
   if (req.path.includes('subtitles') || req.path.includes('manifest') || req.path.includes('configure')) {
-    console.log(`\n📥 ${req.method} ${req.path}`);
+    console.log(`\n${req.method} ${req.path}`);
     if (Object.keys(req.query).length > 0) {
       console.log(`   Query:`, req.query);
     }
@@ -23,7 +23,6 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Cookie parser middleware (simple implementation)
 app.use((req, res, next) => {
   req.cookies = {};
   if (req.headers.cookie) {
@@ -35,7 +34,6 @@ app.use((req, res, next) => {
     });
   }
   
-  // Add cookie setting helper
   res.cookie = function(name, value, options = {}) {
     let cookieString = `${name}=${encodeURIComponent(value)}`;
     
@@ -70,65 +68,57 @@ app.use((req, res, next) => {
   next();
 });
 
-// Model configurations with RPM, TPM, RPD limits
-// Using OpenRouter models - supports Gemma, Llama, Claude, GPT, and more
-// Optimized to use maximum tokens per chunk to minimize requests
 const MODEL_CONFIGS = {
   'meta-llama/llama-3.1-8b-instruct': {
     rpm: 60,
     tpm: 1000000,
     rpd: 10000,
     maxTokens: 8192,
-    priority: 0     // Try first - Llama 8B, reliable
+    priority: 0
   },
   'google/gemma-2-9b-it': {
     rpm: 60,
     tpm: 1000000,
     rpd: 10000,
     maxTokens: 8192,
-    priority: 1     // Second choice - Gemma 9B, good balance
+    priority: 1
   },
   'google/gemma-2-2b-it': {
     rpm: 60,
     tpm: 1000000,
     rpd: 10000,
     maxTokens: 8192,
-    priority: 2     // Third choice - Gemma 2B, faster
+    priority: 2
   },
   'google/gemma-2-1.1b-it': {
     rpm: 60,
     tpm: 1000000,
     rpd: 10000,
     maxTokens: 8192,
-    priority: 3     // Fourth choice - Gemma 1.1B, fastest
+    priority: 3
   },
   'mistralai/mistral-7b-instruct': {
     rpm: 60,
     tpm: 1000000,
     rpd: 10000,
     maxTokens: 8192,
-    priority: 4     // Last resort - Mistral 7B
+    priority: 4
   }
 };
 
-// Initialize OpenRouter AI model selection
-// Note: Each user must configure their own API key - no server-side fallback
 let currentModelName = null;
 let currentModelConfig = null;
 
-// Try models in order of priority (best limits first)
 const modelsToTry = Object.entries(MODEL_CONFIGS)
   .sort((a, b) => a[1].priority - b[1].priority)
   .map(([name, config]) => ({ name, ...config }));
 
-// Select first available model (we'll test on first request)
 currentModelName = modelsToTry[0].name;
 currentModelConfig = MODEL_CONFIGS[currentModelName];
 console.log(`OpenRouter AI model selection initialized: ${currentModelName}`);
 console.log(`  Limits: ${currentModelConfig.rpm} RPM, ${(currentModelConfig.tpm/1000).toFixed(0)}K TPM, ${currentModelConfig.rpd} RPD`);
 console.log(`  Note: Users must configure their own OpenRouter API key in the configuration page`);
 
-// Language code to name mapping
 const LANGUAGE_NAMES = {
   'en': 'English',
   'es': 'Spanish',
@@ -175,14 +165,10 @@ const LANGUAGE_NAMES = {
   'kn': 'Kannada'
 };
 
-/**
- * Get language name from language code
- */
 function getLanguageName(languageCode) {
   return LANGUAGE_NAMES[languageCode.toLowerCase()] || languageCode.toUpperCase();
 }
 
-// Rate limiting state
 let rateLimiter = {
   requestsThisMinute: 0,
   tokensThisMinute: 0,
@@ -191,38 +177,27 @@ let rateLimiter = {
   lastMinuteReset: Date.now()
 };
 
-// User preferences storage (in-memory) - keyed by UUID
 const userPreferences = {};
-const configUuids = {}; // Map userId to UUID
+const configUuids = {};
 
-// Encryption key (in production, use environment variable)
-// Generate a 32-byte key for AES-256
 let ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 if (!ENCRYPTION_KEY) {
-  // Generate a random 32-byte key and store it as hex (64 characters)
   ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
   console.log('Generated encryption key. Set ENCRYPTION_KEY in .env for production.');
 }
 
-// Ensure key is exactly 32 bytes
 const getKey = () => {
   if (ENCRYPTION_KEY.length === 64) {
-    // Hex string, convert to buffer
     return Buffer.from(ENCRYPTION_KEY, 'hex');
   } else if (ENCRYPTION_KEY.length === 32) {
-    // Already a 32-byte string
     return Buffer.from(ENCRYPTION_KEY, 'utf8');
   } else {
-    // Hash to get 32 bytes
     return crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
   }
 };
 
 const IV_LENGTH = 16;
 
-/**
- * Encrypt configuration data
- */
 function encryptConfig(data) {
   const iv = crypto.randomBytes(IV_LENGTH);
   const key = getKey();
@@ -236,9 +211,6 @@ function encryptConfig(data) {
   })).toString('base64');
 }
 
-/**
- * Decrypt configuration data
- */
 function decryptConfig(encryptedData) {
   try {
     const data = JSON.parse(Buffer.from(encryptedData, 'base64').toString('utf8'));
@@ -255,39 +227,25 @@ function decryptConfig(encryptedData) {
   }
 }
 
-// Initialize subtitle cache
 if (!global.subtitleCache) {
   global.subtitleCache = {};
 }
 
-// ============================================================================
-// Configuration Storage (File-Based with Password Protection)
-// ============================================================================
+// Configuration Storage
 
-// Configuration directory
 const CONFIG_DIR = path.join(process.cwd(), 'configs');
 
-// Session storage for unlocked configurations
-// Key: sessionToken, Value: { userId, config, unlockedAt, expiresAt }
 const unlockedConfigs = {};
-const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const SESSION_TIMEOUT = 30 * 60 * 1000;
 const SESSION_COOKIE_NAME = 'aisubs_session';
 
-// Server-side master key for encrypting public configs (read-only access)
-// This allows loading configs on startup without user passwords
-// Set MASTER_KEY in .env for production, or it will generate a random one (configs won't persist across restarts)
-// Note: If MASTER_KEY is not set in .env, a new random key is generated on each restart,
-// which means old public configs won't be decryptable. Set MASTER_KEY in .env for production.
 let MASTER_KEY = process.env.MASTER_KEY;
 if (!MASTER_KEY) {
   MASTER_KEY = crypto.randomBytes(32).toString('hex');
-  console.warn('⚠️  MASTER_KEY not set in .env - using random key. Public configs will not persist across restarts.');
-  console.warn('   Set MASTER_KEY in .env for production use.');
+  console.warn('MASTER_KEY not set in .env - using random key. Public configs will not persist across restarts.');
+  console.warn('Set MASTER_KEY in .env for production use.');
 }
 
-/**
- * Hash a password using PBKDF2
- */
 function hashPassword(password, salt = null) {
   if (!salt) {
     salt = crypto.randomBytes(32).toString('hex');
@@ -296,24 +254,15 @@ function hashPassword(password, salt = null) {
   return { hash, salt };
 }
 
-/**
- * Verify password against hash
- */
 function verifyPassword(password, hash, salt) {
   const hashToVerify = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
   return hashToVerify === hash;
 }
 
-/**
- * Derive encryption key from password using PBKDF2
- */
 function deriveKeyFromPassword(password, salt) {
   return crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha512');
 }
 
-/**
- * Encrypt configuration data with user's password
- */
 function encryptConfigWithPassword(data, password, salt) {
   const key = deriveKeyFromPassword(password, salt);
   const iv = crypto.randomBytes(16);
@@ -326,9 +275,6 @@ function encryptConfigWithPassword(data, password, salt) {
   };
 }
 
-/**
- * Decrypt configuration data with user's password
- */
 function decryptConfigWithPassword(encryptedData, password, salt) {
   try {
     const key = deriveKeyFromPassword(password, salt);
@@ -342,9 +288,6 @@ function decryptConfigWithPassword(encryptedData, password, salt) {
   }
 }
 
-/**
- * Ensure configs directory exists
- */
 async function ensureConfigDir() {
   try {
     await fs.mkdir(CONFIG_DIR, { recursive: true });
@@ -354,9 +297,6 @@ async function ensureConfigDir() {
   }
 }
 
-/**
- * Encrypt data with server master key (for public configs - read-only access)
- */
 function encryptWithMasterKey(data) {
   const key = crypto.createHash('sha256').update(MASTER_KEY).digest();
   const iv = crypto.randomBytes(16);
@@ -369,9 +309,6 @@ function encryptWithMasterKey(data) {
   };
 }
 
-/**
- * Decrypt data with server master key (for public configs - read-only access)
- */
 function decryptWithMasterKey(encryptedData) {
   try {
     const key = crypto.createHash('sha256').update(MASTER_KEY).digest();
@@ -425,10 +362,7 @@ async function saveUserConfig(userId, config, password) {
   
   try {
     await fs.writeFile(configPath, JSON.stringify(configData, null, 2), 'utf8');
-    // Set file permissions to 600 (owner read/write only)
     await fs.chmod(configPath, 0o600);
-    
-    // Update in-memory cache immediately
     userPreferences[userId] = publicConfig;
     
     return configData;
@@ -438,16 +372,12 @@ async function saveUserConfig(userId, config, password) {
   }
 }
 
-/**
- * Load and decrypt user configuration from JSON file
- */
 async function loadUserConfig(userId, password) {
   try {
     const configPath = path.join(CONFIG_DIR, `${userId}.json`);
     const data = await fs.readFile(configPath, 'utf8');
     const fileData = JSON.parse(data);
     
-    // Verify password
     if (!verifyPassword(password, fileData.passwordHash, fileData.passwordSalt)) {
       throw new Error('Incorrect password');
     }
@@ -472,9 +402,6 @@ async function loadUserConfig(userId, password) {
   }
 }
 
-/**
- * Check if config file exists (without decrypting)
- */
 async function configFileExists(userId) {
   try {
     const configPath = path.join(CONFIG_DIR, `${userId}.json`);
@@ -485,35 +412,27 @@ async function configFileExists(userId) {
   }
 }
 
-/**
- * Load public config from file (without password - for read-only access)
- */
 async function loadPublicConfig(userId) {
   try {
     const configPath = path.join(CONFIG_DIR, `${userId}.json`);
     const data = await fs.readFile(configPath, 'utf8');
     const fileData = JSON.parse(data);
     
-    // Decrypt public config with server master key
     if (fileData.encryptedPublicConfig) {
       const publicConfig = decryptWithMasterKey(fileData.encryptedPublicConfig);
       return publicConfig;
     }
     
-    // Fallback: if old format without public config, return null
     return null;
   } catch (error) {
     if (error.code === 'ENOENT') {
-      return null; // Config doesn't exist
+      return null;
     }
     console.error(`Error loading public config for user ${userId}:`, error);
     return null;
   }
 }
 
-/**
- * Load all public configurations on server start (for subtitle requests)
- */
 async function loadAllConfigs() {
   await ensureConfigDir();
   try {
@@ -521,7 +440,6 @@ async function loadAllConfigs() {
     const configFiles = files.filter(file => file.endsWith('.json'));
     console.log(`Found ${configFiles.length} configuration file(s) in ${CONFIG_DIR}`);
     
-    // Load public configs into memory cache
     let loadedCount = 0;
     for (const file of configFiles) {
       const userId = file.replace('.json', '');
@@ -530,10 +448,10 @@ async function loadAllConfigs() {
         if (publicConfig) {
           userPreferences[userId] = publicConfig;
           loadedCount++;
-          console.log(`  ✓ Loaded config for ${userId} - Languages: ${publicConfig.languages?.join(', ') || 'en'}, API Key: ${publicConfig.openrouter?.apiKey ? 'Configured' : 'Not set'}`);
+          console.log(`  Loaded config for ${userId} - Languages: ${publicConfig.languages?.join(', ') || 'en'}, API Key: ${publicConfig.openrouter?.apiKey ? 'Configured' : 'Not set'}`);
         }
       } catch (error) {
-        console.error(`  ✗ Failed to load config for ${userId}:`, error.message);
+        console.error(`  Failed to load config for ${userId}:`, error.message);
       }
     }
     
@@ -545,16 +463,10 @@ async function loadAllConfigs() {
   }
 }
 
-/**
- * Generate a secure session token
- */
 function generateSessionToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-/**
- * Store unlocked config in session with a session token
- */
 function unlockConfig(userId, config, password = null) {
   const sessionToken = generateSessionToken();
   unlockedConfigs[sessionToken] = {
@@ -580,7 +492,6 @@ function getUnlockedConfig(sessionToken) {
     return null;
   }
   
-  // Check if session expired
   if (Date.now() > session.expiresAt) {
     delete unlockedConfigs[sessionToken];
     return null;
@@ -589,16 +500,10 @@ function getUnlockedConfig(sessionToken) {
   return session.config;
 }
 
-/**
- * Get session token from request cookies
- */
 function getSessionToken(req) {
   return req.cookies?.[SESSION_COOKIE_NAME] || null;
 }
 
-/**
- * Check if config is unlocked for this request
- */
 function isConfigUnlocked(req, userId) {
   const sessionToken = getSessionToken(req);
   if (!sessionToken) {
@@ -610,12 +515,10 @@ function isConfigUnlocked(req, userId) {
     return false;
   }
   
-  // Check if session is for this user
   if (session.userId !== userId) {
     return false;
   }
   
-  // Check if session expired
   if (Date.now() > session.expiresAt) {
     delete unlockedConfigs[sessionToken];
     return false;
@@ -624,62 +527,41 @@ function isConfigUnlocked(req, userId) {
   return true;
 }
 
-/**
- * Lock config (remove from session)
- */
 function lockConfig(sessionToken) {
   if (sessionToken) {
     delete unlockedConfigs[sessionToken];
   }
 }
 
-// ============================================================================
 // Helper Functions
-// ============================================================================
 
-/**
- * Extract user ID from Stremio request args
- */
 function getUserId(args) {
   return args.userData?.userId || args.userData?.user || 'default';
 }
 
-/**
- * Get user's preferred languages from stored preferences
- */
 function getUserLanguages(args) {
   const userId = getUserId(args);
   const preferences = userPreferences[userId];
   return preferences?.languages || ['en'];
 }
 
-/**
- * Convert Stremio ID formats to wyzie-lib compatible format
- */
 function parseStremioId(id) {
-  // Handle IMDB format: tt1234567
   if (id.startsWith('tt')) {
     return { imdb_id: id };
   }
   
-  // Handle TMDB format: tmdb:123456
   if (id.startsWith('tmdb:')) {
     return { tmdb_id: parseInt(id.replace('tmdb:', '')) };
   }
   
-  // Try as TMDB ID (numeric)
   const tmdbId = parseInt(id);
   if (!isNaN(tmdbId)) {
     return { tmdb_id: tmdbId };
   }
   
-  // Try as IMDB ID (prepend tt)
   return { imdb_id: `tt${id}` };
 }
 
-/**
- * Fetch subtitle content from URL
- */
 async function fetchSubtitleContent(subtitleUrl) {
   try {
     const response = await axios.get(subtitleUrl, {
@@ -696,22 +578,16 @@ async function fetchSubtitleContent(subtitleUrl) {
   }
 }
 
-/**
- * Search and fetch all subtitles from wyzie-lib for a given language
- * Returns an array of subtitle objects (or single object if only one found)
- */
 async function getSubtitlesFromWyzie(type, id, season, episode, language) {
   try {
     const idParams = parseStremioId(id);
     
-    // Build search parameters
     const searchParams = {
       ...idParams,
       language: language,
-      type: 'srt' // Request SRT format
+      type: 'srt'
     };
     
-    // Add season/episode for TV shows
     if (type === 'series' && season && episode) {
       searchParams.season = parseInt(season);
       searchParams.episode = parseInt(episode);
@@ -719,7 +595,6 @@ async function getSubtitlesFromWyzie(type, id, season, episode, language) {
     
     console.log(`Searching wyzie-lib for ${language} subtitles:`, searchParams);
     
-    // Search for subtitles
     const subtitleResults = await searchSubtitles(searchParams);
     
     if (!subtitleResults || subtitleResults.length === 0) {
@@ -765,25 +640,15 @@ async function getSubtitlesFromWyzie(type, id, season, episode, language) {
   }
 }
 
-/**
- * Estimate token count (rough approximation: 1 token ≈ 4 characters)
- */
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
 
-/**
- * Split subtitles into chunks by character count for parallel processing
- * Simple approach: split 40k chars into ~20 chunks of ~2k chars each
- */
 function splitSubtitlesOptimized(srtContent, modelConfig) {
   const totalChars = srtContent.length;
   
-  // Target ~100 chunks for maximum parallel processing (testing higher limits)
-  // For 40k chars: 40k / 100 = ~400 chars per chunk
-  // More chunks = faster processing + less chance of truncation
   const targetChunks = 100;
-  const charsPerChunk = Math.max(400, Math.ceil(totalChars / targetChunks)); // Min 400 chars, very small chunks for max parallelism
+  const charsPerChunk = Math.max(400, Math.ceil(totalChars / targetChunks));
   
   console.log(`  Splitting ${totalChars.toLocaleString()} chars into ~${Math.ceil(totalChars / charsPerChunk)} chunks (~${charsPerChunk.toLocaleString()} chars each)`);
   
@@ -801,16 +666,13 @@ function splitSubtitlesOptimized(srtContent, modelConfig) {
         const blockText = currentBlock.join('\n');
         const blockChars = blockText.length;
         
-        // Check if adding this block would exceed character limit
-        // Don't split in the middle of a subtitle entry (block)
         if (currentChars + blockChars > charsPerChunk && currentChunk.length > 0) {
-          // Save current chunk and start new one
           chunks.push(currentChunk.join('\n\n') + '\n');
           currentChunk = [blockText];
           currentChars = blockChars;
         } else {
           currentChunk.push(blockText);
-          currentChars += blockChars + 2; // +2 for \n\n separator
+          currentChars += blockChars + 2;
         }
       }
       currentBlock = [];
@@ -827,9 +689,6 @@ function splitSubtitlesOptimized(srtContent, modelConfig) {
   return chunks;
 }
 
-/**
- * Split subtitles into chunks by subtitle count (fallback)
- */
 function splitSubtitlesByCount(srtContent, chunkSize = 50) {
   const lines = srtContent.split('\n');
   const chunks = [];
@@ -855,7 +714,6 @@ function splitSubtitlesByCount(srtContent, chunkSize = 50) {
     }
   }
   
-  // Add remaining chunk
   if (currentChunk.length > 0) {
     chunks.push(currentChunk.join('\n\n') + '\n');
   }
@@ -863,17 +721,12 @@ function splitSubtitlesByCount(srtContent, chunkSize = 50) {
   return chunks;
 }
 
-/**
- * Split a single chunk further into smaller pieces for retry
- * Used when a chunk fails after retries - split it and try smaller pieces
- */
 function splitChunkFurther(chunkContent, maxSplits = 2) {
   const lines = chunkContent.split('\n');
   const chunks = [];
   let currentChunk = [];
   let currentBlock = [];
   
-  // Split into smaller chunks (aim for ~200 chars per chunk)
   const targetCharsPerChunk = Math.max(200, Math.ceil(chunkContent.length / maxSplits));
   let currentChars = 0;
   
@@ -885,44 +738,32 @@ function splitChunkFurther(chunkContent, maxSplits = 2) {
         const blockText = currentBlock.join('\n');
         const blockChars = blockText.length;
         
-        // Check if adding this block would exceed character limit
-        // Don't split in the middle of a subtitle entry (block)
         if (currentChars + blockChars > targetCharsPerChunk && currentChunk.length > 0) {
-          // Save current chunk and start new one
           chunks.push(currentChunk.join('\n\n') + '\n');
           currentChunk = [blockText];
           currentChars = blockChars;
         } else {
           currentChunk.push(blockText);
-          currentChars += blockChars + 2; // +2 for \n\n separator
+          currentChars += blockChars + 2;
         }
       }
       currentBlock = [];
     }
   }
   
-  // Add remaining chunk
   if (currentChunk.length > 0) {
     chunks.push(currentChunk.join('\n\n') + '\n');
   }
   
-  // Return original if can't split (too small or single subtitle entry)
   return chunks.length > 1 ? chunks : [chunkContent];
 }
 
-// Rate limiter lock for concurrent access
 let rateLimitLock = Promise.resolve();
 
-/**
- * Check and enforce rate limits (RPM, TPM, RPD)
- * Non-blocking when under limits, only queues when actually hitting limits
- */
 async function enforceRateLimits(modelConfig) {
   const now = Date.now();
   
-  // Reset minute counters if a minute has passed (atomic check)
   if (now - rateLimiter.lastMinuteReset > 60000) {
-    // Use lock only for counter reset to prevent race conditions
     await rateLimitLock;
     rateLimitLock = (async () => {
       const checkNow = Date.now();
@@ -934,12 +775,10 @@ async function enforceRateLimits(modelConfig) {
     })();
   }
   
-  // Check RPM limit - only wait if we're actually at the limit
-  // For parallel processing, we allow all requests to proceed if under limit
   if (rateLimiter.requestsThisMinute >= modelConfig.rpm) {
     const waitTime = 60000 - (now - rateLimiter.lastMinuteReset);
     if (waitTime > 0) {
-      console.log(`⏳ RPM limit reached (${rateLimiter.requestsThisMinute}/${modelConfig.rpm}), waiting ${Math.ceil(waitTime/1000)}s...`);
+      console.log(`RPM limit reached (${rateLimiter.requestsThisMinute}/${modelConfig.rpm}), waiting ${Math.ceil(waitTime/1000)}s...`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
       rateLimiter.requestsThisMinute = 0;
       rateLimiter.tokensThisMinute = 0;
@@ -947,15 +786,11 @@ async function enforceRateLimits(modelConfig) {
     }
   }
   
-  // Check RPD limit (approximate - resets daily)
   if (rateLimiter.requestsToday >= modelConfig.rpd) {
     throw new Error(`Daily request limit reached (${rateLimiter.requestsToday}/${modelConfig.rpd} RPD). Please try again tomorrow.`);
   }
 }
 
-/**
- * Update rate limiter after request
- */
 function updateRateLimiter(estimatedTokens) {
   rateLimiter.requestsThisMinute++;
   rateLimiter.tokensThisMinute += estimatedTokens;
@@ -963,20 +798,12 @@ function updateRateLimiter(estimatedTokens) {
   rateLimiter.lastRequestTime = Date.now();
 }
 
-/**
- * Calculate delay between requests based on RPM limit
- */
 function calculateRequestDelay(modelConfig) {
-  // Ensure we don't exceed RPM: minimum delay = 60s / RPM
   const minDelay = Math.ceil(60000 / modelConfig.rpm);
-  return Math.max(minDelay, 1000); // At least 1 second
+  return Math.max(minDelay, 1000);
 }
 
-/**
- * Translate subtitles with intelligent chunking (optimized for RPM, TPM, RPD)
- */
 async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLanguage, userConfig) {
-  // Extract user's OpenRouter credentials (required - no fallback)
   const apiKey = userConfig?.openrouter?.apiKey;
   const referer = userConfig?.openrouter?.referer || 'https://stremio-ai-subs.local';
   
@@ -988,7 +815,6 @@ async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLangua
     );
   }
   
-  // Use user's preferred model or auto-select
   const preferredModel = userConfig?.translation?.model;
   let selectedModelName = preferredModel && preferredModel !== 'auto' 
     ? preferredModel 
@@ -1016,7 +842,6 @@ async function translateSubtitlesWithGeminiChunked(subtitleContent, targetLangua
   const requestDelay = calculateRequestDelay(selectedModelConfig);
   console.log(`  Request delay: ${requestDelay}ms between chunks`);
   
-  // Translate chunk with retry logic and rate limiting
   async function translateChunk(chunk, chunkIndex) {
     const startTime = Date.now();
     
@@ -1043,9 +868,8 @@ ${chunk}`;
           throw new Error('OpenRouter API key not configured');
         }
 
-        // Only log retries, not first attempt (reduce noise)
         if (attempt > 0) {
-          console.log(`  📡 Chunk ${chunkIndex + 1}: Retrying API request (attempt ${attempt + 1}/${retries})...`);
+          console.log(`  Chunk ${chunkIndex + 1}: Retrying API request (attempt ${attempt + 1}/${retries})...`);
         }
         const response = await axios.post(
           'https://openrouter.ai/api/v1/chat/completions',
@@ -1071,27 +895,23 @@ ${chunk}`;
           }
         );
 
-        // Check if response was truncated
         const finishReason = response.data.choices[0]?.finish_reason;
         if (finishReason === 'length') {
-          console.log(`  ⚠️  Chunk ${chunkIndex + 1}: Response was truncated (hit max_tokens limit). Consider using smaller chunks.`);
+          console.log(`  Chunk ${chunkIndex + 1}: Response was truncated (hit max_tokens limit). Consider using smaller chunks.`);
         }
 
         let translatedContent = response.data.choices[0].message.content;
         
-        // Handle empty or whitespace-only responses
         if (!translatedContent || !translatedContent.trim()) {
           throw new Error('API returned empty or whitespace-only response');
         }
         
         translatedContent = translatedContent.trim();
         
-        // Clean markdown code blocks
         if (translatedContent.startsWith('```')) {
           translatedContent = translatedContent.replace(/```[\w]*\n?/g, '').replace(/```$/g, '').trim();
         }
         
-        // Remove unwanted commentary and instructions from model output
         const lines = translatedContent.split('\n');
         const cleanedLines = [];
         let foundFirstSubtitle = false;
@@ -1123,66 +943,48 @@ ${chunk}`;
           const line = lines[i];
           const trimmedLine = line.trim();
           
-          // Skip empty lines at the start
           if (!foundFirstSubtitle && !trimmedLine) {
             continue;
           }
           
-          // Check if this is the first subtitle entry (starts with number or timing)
           if (!foundFirstSubtitle) {
             if (trimmedLine.match(/^\d+$/) || trimmedLine.match(/^\d{2}:\d{2}:\d{2}/)) {
               foundFirstSubtitle = true;
               cleanedLines.push(line);
             } else if (skipPatterns.some(pattern => pattern.test(trimmedLine))) {
-              // Skip commentary/instruction lines
               continue;
             } else if (trimmedLine && trimmedLine.length > 0) {
-              // Include other content (might be part of subtitle)
               cleanedLines.push(line);
             }
           } else {
-            // After first subtitle found, include all lines
             cleanedLines.push(line);
           }
         }
         
-        // Join and remove trailing commentary
         translatedContent = cleanedLines.join('\n');
-        // Remove common trailing patterns (multiline, more aggressive)
         translatedContent = translatedContent.replace(/\n\s*(Note:|Here is|Translation|மொழி பெயர்ப்பு|கட்டுப்பாடுகள்|Format|Keep|Translate|Start).*$/gim, '');
-        // Remove instruction blocks (numbered lists)
         translatedContent = translatedContent.replace(/\n\s*\d+\.\s*(Return|Preserve|Keep|Translate|Do NOT|Start).*$/gim, '');
-        // Remove any remaining Tamil instruction text
         translatedContent = translatedContent.replace(/\n\s*கட்டுப்பாடுகள்:.*$/gim, '');
         translatedContent = translatedContent.replace(/\n\s*மொழி பெயர்ப்பு:.*$/gim, '');
         translatedContent = translatedContent.trim();
         
-        // Check if translation appears incomplete (ends mid-sentence or mid-subtitle)
         if (finishReason === 'length') {
-          // Response was truncated - try to detect and fix incomplete subtitle entry
           const lines = translatedContent.split('\n');
           const lastLine = lines[lines.length - 1];
           
-          // Check if last line is incomplete (doesn't end with proper subtitle format)
-          // A complete subtitle entry should have: number, timing, text, empty line
           if (lastLine && lastLine.trim() && !lastLine.match(/^\s*$/)) {
-            // Last line has content - check if it's a valid subtitle line
             const isTimingLine = lastLine.match(/^\d{2}:\d{2}:\d{2}/);
             const isNumberLine = lastLine.match(/^\d+$/);
             const isTextLine = !isTimingLine && !isNumberLine;
             
-            // If it ends with text (not timing or number), it might be incomplete
             if (isTextLine && !translatedContent.match(/\n\s*$/)) {
-              console.log(`  ⚠️  Chunk ${chunkIndex + 1}: Translation appears incomplete (ends mid-subtitle). Last line: "${lastLine.substring(0, 50)}..."`);
-              // Try to remove the incomplete last subtitle entry
-              // Find the last complete subtitle entry (ends with empty line)
+              console.log(`  Chunk ${chunkIndex + 1}: Translation appears incomplete (ends mid-subtitle). Last line: "${lastLine.substring(0, 50)}..."`);
               const lastEmptyLineIndex = translatedContent.lastIndexOf('\n\n');
               if (lastEmptyLineIndex > 0) {
                 const beforeLastEntry = translatedContent.substring(0, lastEmptyLineIndex + 2);
                 const incompleteEntry = translatedContent.substring(lastEmptyLineIndex + 2);
-                // Only remove if incomplete entry is very short (likely incomplete)
                 if (incompleteEntry.length < 100) {
-                  console.log(`  🔧 Chunk ${chunkIndex + 1}: Removing incomplete last subtitle entry`);
+                  console.log(`  Chunk ${chunkIndex + 1}: Removing incomplete last subtitle entry`);
                   translatedContent = beforeLastEntry.trim();
                 }
               }
@@ -1190,12 +992,11 @@ ${chunk}`;
           }
         }
         
-        // Update rate limiter
         const responseTokens = estimateTokens(translatedContent);
         updateRateLimiter(estimatedTokens + responseTokens);
         
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`  ✅ Chunk ${chunkIndex + 1}/${chunks.length} translated (~${estimatedTokens + responseTokens} tokens) in ${elapsed}s`);
+        console.log(`  Chunk ${chunkIndex + 1}/${chunks.length} translated (~${estimatedTokens + responseTokens} tokens) in ${elapsed}s`);
         return translatedContent;
       } catch (error) {
         lastError = error;
@@ -1253,23 +1054,21 @@ ${chunk}`;
   const batchResults = await Promise.all(batch);
   console.log(`  📦 All ${batch.length} chunk(s) completed`);
   
-  // Store results in correct order and check for errors
   const errors = [];
-  const failedChunks = []; // Track failed chunks for retry
+  const failedChunks = [];
   
   for (const { index, result, error } of batchResults) {
     if (error) {
       errors.push(`Chunk ${index + 1}: ${error.message}`);
       failedChunks.push({ index, chunk: chunks[index], error: error.message });
-      translatedChunks[index] = null; // Mark as failed
+      translatedChunks[index] = null;
     } else {
       translatedChunks[index] = result;
     }
   }
   
-  // Retry failed chunks with exponential backoff
   if (failedChunks.length > 0) {
-    console.log(`  🔄 Retrying ${failedChunks.length} failed chunk(s)...`);
+    console.log(`  Retrying ${failedChunks.length} failed chunk(s)...`);
     
     for (const { index, chunk, error: originalError } of failedChunks) {
       const retryAttempts = 3;
@@ -1277,60 +1076,53 @@ ${chunk}`;
       
       for (let retry = 0; retry < retryAttempts && !retrySuccess; retry++) {
         try {
-          const waitTime = 2000 * Math.pow(2, retry); // Exponential backoff: 2s, 4s, 8s
+          const waitTime = 2000 * Math.pow(2, retry);
           if (retry > 0) {
-            console.log(`  🔄 Retrying chunk ${index + 1} (attempt ${retry + 1}/${retryAttempts}) after ${waitTime/1000}s...`);
+            console.log(`  Retrying chunk ${index + 1} (attempt ${retry + 1}/${retryAttempts}) after ${waitTime/1000}s...`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
           } else {
-            console.log(`  🔄 Retrying chunk ${index + 1} immediately...`);
+            console.log(`  Retrying chunk ${index + 1} immediately...`);
           }
           
-          // Try translating the chunk again
           const retryResult = await translateChunk(chunk, index);
           translatedChunks[index] = retryResult;
           retrySuccess = true;
-          console.log(`  ✅ Chunk ${index + 1} succeeded on retry`);
+          console.log(`  Chunk ${index + 1} succeeded on retry`);
           
-          // Remove from errors list
           const errorIndex = errors.findIndex(e => e.startsWith(`Chunk ${index + 1}:`));
           if (errorIndex >= 0) {
             errors.splice(errorIndex, 1);
           }
         } catch (retryError) {
-          console.log(`  ⚠️  Chunk ${index + 1} retry ${retry + 1} failed: ${retryError.message}`);
+          console.log(`  Chunk ${index + 1} retry ${retry + 1} failed: ${retryError.message}`);
           
-          // If all retries failed, try splitting the chunk
           if (retry === retryAttempts - 1) {
-            console.log(`  🔪 Splitting chunk ${index + 1} into smaller pieces...`);
+            console.log(`  Splitting chunk ${index + 1} into smaller pieces...`);
             
             try {
               const splitChunks = splitChunkFurther(chunk);
               
               if (splitChunks.length > 1) {
-                console.log(`  📦 Split chunk ${index + 1} into ${splitChunks.length} smaller chunk(s)`);
+                console.log(`  Split chunk ${index + 1} into ${splitChunks.length} smaller chunk(s)`);
                 
-                // Translate each split chunk
                 const splitResults = [];
                 for (let splitIdx = 0; splitIdx < splitChunks.length; splitIdx++) {
                   try {
                     const splitResult = await translateChunk(splitChunks[splitIdx], `${index}.${splitIdx}`);
                     splitResults.push(splitResult);
-                    console.log(`  ✅ Split chunk ${index + 1}.${splitIdx + 1} translated successfully`);
+                    console.log(`  Split chunk ${index + 1}.${splitIdx + 1} translated successfully`);
                   } catch (splitError) {
-                    console.log(`  ❌ Split chunk ${index + 1}.${splitIdx + 1} failed: ${splitError.message}`);
-                    // Even if one split fails, try to use the others
+                    console.log(`  Split chunk ${index + 1}.${splitIdx + 1} failed: ${splitError.message}`);
                     splitResults.push(null);
                   }
                 }
                 
-                // Combine successful split results
                 const validSplitResults = splitResults.filter(r => r !== null);
                 if (validSplitResults.length > 0) {
                   translatedChunks[index] = validSplitResults.join('\n\n');
                   retrySuccess = true;
-                  console.log(`  ✅ Chunk ${index + 1} succeeded after splitting (${validSplitResults.length}/${splitChunks.length} parts)`);
+                  console.log(`  Chunk ${index + 1} succeeded after splitting (${validSplitResults.length}/${splitChunks.length} parts)`);
                   
-                  // Remove from errors list
                   const errorIndex = errors.findIndex(e => e.startsWith(`Chunk ${index + 1}:`));
                   if (errorIndex >= 0) {
                     errors.splice(errorIndex, 1);
@@ -1484,21 +1276,13 @@ function convertToVTT(content, currentFormat) {
   // Convert SRT to VTT (manual conversion)
   if (currentFormat === 'srt' || currentFormat === 'sub') {
     try {
-      // Convert SRT format to VTT format
-      // SRT: number, timing (comma), text, blank line
-      // VTT: timing (dot), text, blank line
       let vttContent = content
-        // Remove subtitle numbers (lines that are just digits)
         .replace(/^\d+\s*$/gm, '')
-        // Convert comma to dot in timestamps
         .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
-        // Ensure proper VTT timing format
         .replace(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/g, '$1 --> $2')
-        // Clean up multiple blank lines
         .replace(/\n{3,}/g, '\n\n')
         .trim();
       
-      // Ensure WEBVTT header is present
       if (!vttContent.startsWith('WEBVTT')) {
         vttContent = 'WEBVTT\n\n' + vttContent;
       }
@@ -1510,39 +1294,27 @@ function convertToVTT(content, currentFormat) {
     }
   }
   
-  // For other formats, return as is with WEBVTT header
   if (!content.trim().startsWith('WEBVTT')) {
     return 'WEBVTT\n\n' + content;
   }
   return content;
 }
 
-/**
- * Serve subtitle content and return URL
- */
 async function serveSubtitleContent(content, language, type, id, season, episode) {
   if (!content) {
     return null;
   }
   
-  // Generate unique subtitle ID
   const subtitleId = `${type}_${id}_${season || ''}_${episode || ''}_${language}_${Date.now()}`;
   
-  // Store in cache
   global.subtitleCache[subtitleId] = content;
   
-  // Return URL endpoint for serving subtitle
   const baseUrl = process.env.BASE_URL || `http://127.0.0.1:${process.env.PORT || 7000}`;
   return `${baseUrl}/subtitle/${subtitleId}.vtt`;
 }
 
-// ============================================================================
 // Express Routes
-// ============================================================================
 
-/**
- * Serve subtitle files
- */
 app.get('/subtitle/:id.vtt', (req, res) => {
   const subtitleId = req.params.id;
   
@@ -1553,7 +1325,6 @@ app.get('/subtitle/:id.vtt', (req, res) => {
     const content = global.subtitleCache[subtitleId];
     console.log(`Serving subtitle ${subtitleId}, length: ${content.length} chars`);
     
-    // Ensure VTT header is present
     let vttContent = content;
     if (!vttContent.startsWith('WEBVTT')) {
       vttContent = 'WEBVTT\n\n' + vttContent;
@@ -1572,7 +1343,6 @@ app.get('/subtitle/:id.vtt', (req, res) => {
   }
 });
 
-// Handle OPTIONS for CORS preflight
 app.options('/subtitle/:id.vtt', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -1580,9 +1350,6 @@ app.options('/subtitle/:id.vtt', (req, res) => {
   res.sendStatus(200);
 });
 
-/**
- * Generate or get UUID for user configuration
- */
 function getOrCreateUuid(userId) {
   if (!configUuids[userId]) {
     configUuids[userId] = uuidv4();
@@ -1590,9 +1357,6 @@ function getOrCreateUuid(userId) {
   return configUuids[userId];
 }
 
-/**
- * Get UUID from encrypted config or create new one
- */
 function getUuidFromConfig(encryptedConfig) {
   if (!encryptedConfig) {
     return null;
@@ -1605,17 +1369,11 @@ function getUuidFromConfig(encryptedConfig) {
   }
 }
 
-/**
- * Validate UUID format (UUID v4)
- */
 function isValidUUID(uuid) {
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   return uuidRegex.test(uuid);
 }
 
-/**
- * Generate error page HTML with theme matching
- */
 function generateErrorPage(title, message) {
   return `
     <!DOCTYPE html>
@@ -2050,7 +1808,6 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
     { code: 'kn', name: 'Kannada', flag: '🇮🇳' }
   ];
   
-  // Sort languages: selected languages first (maintaining their order), then unselected
   const sortedLanguages = [...languages].sort((a, b) => {
     const aSelected = selectedLangs.includes(a.code);
     const bSelected = selectedLangs.includes(b.code);
@@ -2719,7 +2476,6 @@ function renderConfigPage(req, res, userId, uuid, encryptedConfig, currentPrefs)
     { code: 'kn', name: 'Kannada', flag: '🇮🇳' }
   ];
   
-  // Sort languages: selected languages first (maintaining their order), then unselected
   const sortedLanguages = [...languages].sort((a, b) => {
     const aSelected = selectedLangs.includes(a.code);
     const bSelected = selectedLangs.includes(b.code);
@@ -3436,7 +3192,6 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     ));
   }
   
-  // Verify password by trying to load config
   let passwordSalt;
   try {
     const fileExists = await configFileExists(userId);
@@ -3447,9 +3202,7 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
       ));
     }
     
-    // Try to load config to verify password
     const testConfig = await loadUserConfig(userId, password);
-    // Get salt from file
     const configPath = path.join(CONFIG_DIR, `${userId}.json`);
     const fileData = JSON.parse(await fs.readFile(configPath, 'utf8'));
     passwordSalt = fileData.passwordSalt;
@@ -3463,7 +3216,6 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     throw error;
   }
   
-  // Validate UUID format
   if (!isValidUUID(uuid)) {
       return res.status(400).send(generateErrorPage(
         'Invalid Configuration',
@@ -3471,7 +3223,6 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
       ));
   }
   
-  // Extract form data
   let languages = [];
   if (Array.isArray(req.body.languages)) {
     languages = req.body.languages.map(lang => lang.trim().toLowerCase()).filter(lang => lang.length > 0);
@@ -3486,11 +3237,9 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     languages = ['en'];
   }
   
-  // Extract OpenRouter credentials
   const openrouterApiKey = (req.body.openrouterApiKey || '').trim();
   const openrouterReferer = (req.body.openrouterReferer || process.env.OPENROUTER_REFERER || '').trim();
   
-  // Validate API key format if provided
   if (openrouterApiKey && openrouterApiKey.length > 0) {
     if (!openrouterApiKey.startsWith('sk-or-v1-') && !openrouterApiKey.startsWith('sk-')) {
       return res.status(400).send(generateErrorPage(
@@ -3506,7 +3255,6 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     }
   }
   
-  // Build new config
   const newConfig = {
     languages: languages,
     uuid: userId,
@@ -3521,14 +3269,11 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     }
   };
   
-    // Save with password
     try {
       await saveUserConfig(userId, newConfig, password);
       
-      // Update unlocked session (get or create new session token)
       const sessionToken = getSessionToken(req) || unlockConfig(userId, newConfig);
       if (!getSessionToken(req)) {
-        // Set session cookie if not already set
         res.cookie(SESSION_COOKIE_NAME, sessionToken, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
@@ -3536,18 +3281,16 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
           maxAge: SESSION_TIMEOUT
         });
       } else {
-        // Update existing session (preserve password if it exists)
         const existingSession = unlockedConfigs[sessionToken];
         unlockedConfigs[sessionToken] = {
           userId: userId,
           config: newConfig,
-          password: existingSession?.password || password, // Preserve existing password or use new one
+          password: existingSession?.password || password,
           unlockedAt: existingSession?.unlockedAt || Date.now(),
           expiresAt: Date.now() + SESSION_TIMEOUT
         };
       }
       
-      // Generate new encrypted config for URL
       const newEncryptedConfig = encryptConfig({ 
         uuid: userId, 
         languages: languages,
@@ -3555,10 +3298,9 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
         translation: newConfig.translation
       });
       
-      // Update in-memory cache for subtitle requests
       userPreferences[userId] = newConfig;
       
-      console.log(`✅ Saved configuration to file: configs/${userId}.json`);
+      console.log(`Saved configuration to file: configs/${userId}.json`);
       console.log(`  Languages: ${languages.join(', ')}`);
       console.log(`  OpenRouter API Key: ${openrouterApiKey ? '***' + openrouterApiKey.slice(-4) : 'Not set'}`);
       
@@ -3572,12 +3314,8 @@ app.post('/stremio/:uuid/:encryptedConfig/configure', async (req, res) => {
     }
 });
 
-/**
- * Root configure page - creates new UUID and redirects
- */
 app.get('/configure', (req, res) => {
   const newUuid = uuidv4();
-  // Don't create config file yet - user will set password on first visit
   const defaultConfig = {
     uuid: newUuid,
     languages: ['en']
@@ -3586,9 +3324,7 @@ app.get('/configure', (req, res) => {
   res.redirect(`/stremio/${newUuid}/${newConfig}/configure`);
 });
 
-// ============================================================================
 // Stremio Addon Builder
-// ============================================================================
 
 const builder = new addonBuilder({
   id: 'com.aistreamio.subtitles',
@@ -3616,28 +3352,19 @@ const builder = new addonBuilder({
   ]
 });
 
-// ============================================================================
 // Subtitles Handler
-// ============================================================================
 
-// Store the handler function so we can call it directly from the route
 let subtitleHandlerFunction = null;
 
-// Define the subtitle handler function
 const subtitleHandler = async function(args) {
   const { type, id, extra, userData } = args;
   const season = extra?.season;
   const episode = extra?.episode;
   
   try {
-    // Get user's preferred languages from userData (UUID-based)
     const userId = userData?.userId || userData?.uuid || 'default';
     
-    // Get user's full configuration
-    // For subtitle requests, we use cached config or default (no password required)
     let userConfig = null;
-    
-    // Try to get from unlocked session (if user recently accessed config page)
     // Note: For subtitle requests, we can't use req object, so we'll use a fallback
     // Subtitle requests don't require password (read-only access)
     // We'll use the in-memory cache or default config
@@ -3665,39 +3392,32 @@ const subtitleHandler = async function(args) {
     // Use languages from the loaded config (not from getUserLanguages which uses old cache)
     const preferredLanguages = userConfig.languages || ['en'];
     
-    // Always include English first, then user's preferred languages
     const allLanguages = ['en', ...preferredLanguages.filter(lang => lang !== 'en')];
     const subtitles = [];
     
-    // Store the best English subtitle for translation (first one is typically best)
     let bestEnglishSubtitle = null;
     
-    console.log(`\n🔍 Processing subtitle request for ${type}/${id} (season: ${season}, episode: ${episode})`);
-    console.log(`👤 User ID: ${userId}`);
-    console.log(`🌐 User preferred languages: ${preferredLanguages.join(', ')}`);
-    console.log(`🔑 OpenRouter API Key: ${userConfig.openrouter?.apiKey ? 'Configured' : 'Not configured - translation will fail'}`);
-    console.log(`📋 Processing languages: ${allLanguages.join(', ')}`);
+    console.log(`\nProcessing subtitle request for ${type}/${id} (season: ${season}, episode: ${episode})`);
+    console.log(`User ID: ${userId}`);
+    console.log(`User preferred languages: ${preferredLanguages.join(', ')}`);
+    console.log(`OpenRouter API Key: ${userConfig.openrouter?.apiKey ? 'Configured' : 'Not configured - translation will fail'}`);
+    console.log(`Processing languages: ${allLanguages.join(', ')}`);
     
     for (const lang of allLanguages) {
       try {
-        // Step 1: Try to get subtitle from wyzie-lib
         console.log(`Attempting to fetch ${lang} subtitle from wyzie-lib...`);
         const wyzieSubtitles = await getSubtitlesFromWyzie(type, id, season, episode, lang);
         
-        // Handle both single subtitle (backward compatibility) and array of subtitles
         const subtitleArray = Array.isArray(wyzieSubtitles) ? wyzieSubtitles : (wyzieSubtitles ? [wyzieSubtitles] : []);
         
         if (subtitleArray.length > 0) {
-          // Found in wyzie-lib, process all subtitles
           console.log(`Found ${subtitleArray.length} ${lang} subtitle(s) in wyzie-lib`);
           
-          // Store the first (best) English subtitle for translation
           if (lang === 'en' && !bestEnglishSubtitle) {
             bestEnglishSubtitle = subtitleArray[0];
             console.log(`Stored best English subtitle for translation (using first of ${subtitleArray.length} available)`);
           }
           
-          // Process and return ALL subtitles found for this language
           for (let i = 0; i < subtitleArray.length; i++) {
             const wyzieSubtitle = subtitleArray[i];
             
@@ -3706,7 +3426,6 @@ const subtitleHandler = async function(args) {
               continue;
             }
             
-            // Convert to VTT if needed
             const vttContent = convertToVTT(wyzieSubtitle.content, wyzieSubtitle.format);
             
             if (!vttContent) {
@@ -3714,7 +3433,6 @@ const subtitleHandler = async function(args) {
               continue;
             }
             
-            // Serve the subtitle
             const subtitleUrl = await serveSubtitleContent(
               vttContent,
               lang,
@@ -3725,7 +3443,6 @@ const subtitleHandler = async function(args) {
             );
             
             if (subtitleUrl) {
-              // Add index to name if multiple subtitles for same language
               const subtitleName = subtitleArray.length > 1 
                 ? `${lang.toUpperCase()} Subtitles (${i + 1})`
                 : `${lang.toUpperCase()} Subtitles`;
@@ -3739,17 +3456,15 @@ const subtitleHandler = async function(args) {
             }
           }
         } else {
-          // Step 2: Not found in wyzie-lib, try to translate from English
           console.log(`${lang} subtitle not found in wyzie-lib, attempting AI translation from English...`);
           
-          // Use the best English subtitle we already fetched, or fetch it now if not available
           let englishSubtitle = bestEnglishSubtitle;
           
           if (!englishSubtitle) {
             console.log(`Best English subtitle not cached, fetching now...`);
             const englishSubtitles = await getSubtitlesFromWyzie(type, id, season, episode, 'en');
             const englishArray = Array.isArray(englishSubtitles) ? englishSubtitles : (englishSubtitles ? [englishSubtitles] : []);
-            englishSubtitle = englishArray.length > 0 ? englishArray[0] : null;  // Use first (best) one
+            englishSubtitle = englishArray.length > 0 ? englishArray[0] : null;
             
             if (englishSubtitle) {
               bestEnglishSubtitle = englishSubtitle;
@@ -3758,11 +3473,10 @@ const subtitleHandler = async function(args) {
           
           if (englishSubtitle && englishSubtitle.content) {
             try {
-              // Translate using OpenRouter AI
               const translatedContent = await translateSubtitlesWithGemini(
                 englishSubtitle.content,
                 lang,
-                userConfig  // Pass user configuration
+                userConfig
               );
               
               if (!translatedContent) {
@@ -3798,13 +3512,12 @@ const subtitleHandler = async function(args) {
               }
             } catch (translationError) {
               if (translationError.message.includes('API key not configured')) {
-                console.error(`⚠️  Translation failed: User needs to configure OpenRouter API key`);
+                console.error(`Translation failed: User needs to configure OpenRouter API key`);
                 const baseUrl = process.env.BASE_URL || `http://${req?.get?.('host') || 'localhost:7001'}`;
-                console.error(`   Visit: ${baseUrl}/configure`);
+                console.error(`Visit: ${baseUrl}/configure`);
               } else {
                 console.error(`Error translating to ${lang}:`, translationError.message);
               }
-              // Continue with other languages
             }
           } else {
             console.log(`English subtitle not available for translation to ${lang}`);
@@ -3812,13 +3525,12 @@ const subtitleHandler = async function(args) {
         }
       } catch (error) {
         console.error(`Error processing ${lang} subtitle:`, error.message);
-        // Continue with other languages
       }
     }
     
-    console.log(`✅ Returning ${subtitles.length} subtitle(s) for ${type}/${id}`);
+    console.log(`Returning ${subtitles.length} subtitle(s) for ${type}/${id}`);
     if (subtitles.length === 0) {
-      console.log(`⚠️  No subtitles found/translated. This might be because:`);
+      console.log(`No subtitles found/translated. This might be because:`);
       console.log(`   - No English subtitles available for this content`);
       console.log(`   - Translation failed`);
       console.log(`   - Subtitle fetching from wyzie-lib failed`);
@@ -3826,30 +3538,24 @@ const subtitleHandler = async function(args) {
     return Promise.resolve({ subtitles });
     
   } catch (error) {
-    console.error('❌ Error in subtitles handler:', error);
+    console.error('Error in subtitles handler:', error);
     console.error('Stack:', error.stack);
     return Promise.resolve({ subtitles: [] });
   }
 };
 
-// Store reference for direct calls from route handler
 subtitleHandlerFunction = subtitleHandler;
 
-// Register with builder
 builder.defineSubtitlesHandler(subtitleHandler);
 
-// ============================================================================
 // Server Setup
-// ============================================================================
 
 const port = process.env.PORT || 7001;
 
-// Mount Stremio addon routes with UUID support
 app.get('/stremio/:uuid/:encryptedConfig/manifest.json', async (req, res) => {
   try {
     const { uuid, encryptedConfig } = req.params;
     
-    // Build manifest data with UUID-specific ID
     const baseUrl = process.env.BASE_URL || `http://127.0.0.1:${port}`;
     const configUrl = `${baseUrl}/stremio/${uuid}/${encryptedConfig}/configure`;
     
@@ -3877,9 +3583,6 @@ app.get('/stremio/:uuid/:encryptedConfig/manifest.json', async (req, res) => {
   }
 });
 
-// Handle Stremio subtitle requests - supports both formats:
-// 1. /subtitles/:type/:id.json?query=params (standard)
-// 2. /subtitles/:type/:id/filename=...&videoSize=...&videoHash=....json (Stremio format)
 app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req, res) => {
   try {
     let { uuid, encryptedConfig, type, id } = req.params;
@@ -3890,31 +3593,24 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
     console.log(`Full URL: ${req.url}`);
     console.log(`Raw ID param: ${id}`);
     
-    // Handle Stremio's format where query params are embedded in the path
-    // Path format: tt0903747%3A1%3A1/filename=...&videoSize=...&videoHash=....json
     if (id && (id.includes('filename=') || id.includes('videoSize=') || id.includes('videoHash='))) {
-      // Split the ID part from the query-like params
       const parts = id.split('/');
       const actualId = parts[0];
       id = decodeURIComponent(actualId);
       
-      // Parse the rest as query parameters
       if (parts.length > 1) {
         const queryString = parts.slice(1).join('/');
-        // Remove .json from the end if present
         const cleanQuery = queryString.replace(/\.json$/, '');
         
-        // Parse filename=value&videoSize=value&videoHash=value format
         cleanQuery.split('&').forEach(param => {
           const [key, ...valueParts] = param.split('=');
           if (key && valueParts.length > 0) {
-            const value = valueParts.join('='); // Handle values that might contain =
+            const value = valueParts.join('=');
             extra[decodeURIComponent(key)] = decodeURIComponent(value);
           }
         });
       }
     } else {
-      // Standard format - just decode the ID
       id = decodeURIComponent(id);
     }
     
@@ -3928,7 +3624,6 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
     console.log(`Extra params:`, extra);
     console.log(`Full URL: ${req.url}`);
     
-    // Decrypt config to get user preferences
     let userId = uuid;
     let decryptedUrlConfig = null;
     if (encryptedConfig && encryptedConfig !== 'new') {
@@ -3937,15 +3632,11 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
         userId = decryptedUrlConfig.uuid || uuid;
         console.log(`Decrypted config from URL - User ID: ${userId}, Languages: ${decryptedUrlConfig.languages?.join(', ')}`);
       } else {
-        console.log('⚠️  Could not decrypt config, using UUID');
+        console.log('Could not decrypt config, using UUID');
       }
     }
     
-    // Try to load from file-based config cache (if available)
-    // This ensures we use the latest saved config, not the old URL-encrypted one
-    // Only use URL config as fallback if cache doesn't exist
     if (!userPreferences[userId] && decryptedUrlConfig) {
-      // Fallback to URL config if cache not available
       userPreferences[userId] = {
         languages: decryptedUrlConfig.languages || ['en'],
         uuid: userId,
@@ -3963,17 +3654,15 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
       console.log(`Using cached config - Languages: ${userPreferences[userId].languages?.join(', ')}`);
     }
     
-    // Parse season/episode from ID if present (format: tt0903747:1:1)
     let season, episode;
     if (id.includes(':')) {
       const parts = id.split(':');
-      id = parts[0]; // Extract base ID (tt0903747)
+      id = parts[0];
       if (parts.length >= 2) season = parseInt(parts[1]);
       if (parts.length >= 3) episode = parseInt(parts[2]);
       console.log(`Parsed ID: ${id}, Season: ${season}, Episode: ${episode}`);
     }
     
-    // Merge season/episode from ID with query params (query params take precedence)
     const finalExtra = {
       ...extra,
       season: extra.season || season,
@@ -3990,7 +3679,6 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
     
     console.log(`Calling subtitle handler with args:`, JSON.stringify(args, null, 2));
     
-    // Call the subtitle handler directly (stored reference)
     if (!subtitleHandlerFunction) {
       throw new Error('Subtitle handler not initialized. Server may need restart.');
     }
@@ -4009,13 +3697,12 @@ app.get('/stremio/:uuid/:encryptedConfig/subtitles/:type/:id*.json', async (req,
     res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.json(result);
   } catch (error) {
-    console.error('❌ Error serving subtitles:', error);
+    console.error('Error serving subtitles:', error);
     console.error('Stack:', error.stack);
     res.status(500).json({ error: 'Failed to serve subtitles', message: error.message });
   }
 });
 
-// Legacy routes for backward compatibility
 app.get('/manifest.json', async (req, res) => {
   const newUuid = uuidv4();
   const newConfig = encryptConfig({ uuid: newUuid, languages: ['en'] });
@@ -4028,7 +3715,6 @@ app.get('/subtitles/:type/:id.json', async (req, res) => {
   res.redirect(`/stremio/${newUuid}/${newConfig}/subtitles/${req.params.type}/${req.params.id}.json`);
 });
 
-// Health check endpoint for Docker and monitoring
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -4042,14 +3728,13 @@ app.get('/health', (req, res) => {
   try {
     await ensureConfigDir();
     const count = await loadAllConfigs();
-    console.log(`📁 Configuration directory ready: ${CONFIG_DIR}`);
+    console.log(`Configuration directory ready: ${CONFIG_DIR}`);
   } catch (error) {
     console.error('Error initializing configs directory:', error);
     console.log('Server will continue, but config saving may fail');
   }
 })();
 
-// Start server
 const server = app.listen(port, () => {
   console.log(`\n========================================`);
   console.log(`AI Subtitle Translator Addon`);
@@ -4062,7 +3747,7 @@ const server = app.listen(port, () => {
 
 server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
-    console.error(`\n❌ Error: Port ${port} is already in use.`);
+    console.error(`\nError: Port ${port} is already in use.`);
     console.error(`Please either:`);
     console.error(`  1. Stop the process using port ${port}: lsof -ti:${port} | xargs kill -9`);
     console.error(`  2. Use a different port by setting PORT in .env file\n`);
